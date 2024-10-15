@@ -1,0 +1,263 @@
+   set ignoreTypes = false.
+
+   type pubKey.
+   type secKey.
+   type key.
+   type seq.
+
+   table ueDB(bitstring, key, seq).
+
+   free sch:   channel [private].
+   free usch:  channel.
+
+   const AMF: bitstring.
+   const SNname: bitstring.
+   
+   free test1: bitstring[private].
+   free test2: bitstring[private].
+   free test3: bitstring[private].   
+
+   fun fP_k1(key): key.
+   fun fP_k2(key): key.
+   fun sha256(bitstring): bitstring.
+   fun calc_sqn(seq, pubKey, bitstring): seq.
+   fun pk(secKey): pubKey.
+   fun hmac(key, bitstring): bitstring.
+
+   fun f1(bitstring, bitstring, bitstring): bitstring. (* MAC *)
+   fun f2(bitstring): bitstring. (* XRES *)
+   fun f3(bitstring): bitstring. (* CK *)
+   fun f4(bitstring): bitstring. (* IK *)
+   fun f5(bitstring): bitstring. (* AK *)
+
+   fun k2b(key):           bitstring[data, typeConverter].
+   fun b2k(bitstring):     key[data, typeConverter].
+   fun k2sk(key):          secKey[data, typeConverter].
+   fun pk2b(pubKey):       bitstring[data, typeConverter].
+   fun n2b(nat):           bitstring[data, typeConverter].
+   fun seq2b(seq):         bitstring[data, typeConverter].
+   fun b2seq(bitstring):   seq[data, typeConverter].
+
+   (* Encryption/Decryption *)
+   fun senc(bitstring, key): bitstring.
+   reduc forall m: bitstring, n: key;
+   sdec(senc(m, n), n) = m.
+
+   (* XOR *)
+   fun xor(bitstring, bitstring): bitstring.
+   equation forall m: bitstring, n: bitstring;
+   xor(xor(m, n), n) = m.
+
+   (* DH key-exchange *)
+   fun DHkey(secKey, pubKey): key.
+   equation forall sk1: secKey, sk2: secKey;
+   DHkey(sk2, pk(sk1)) = DHkey(sk1, pk(sk2)).
+
+   (* a Key Derivation function *)
+   fun KDF(bitstring): key.
+
+   (* Event *)
+   event beginUE_HN_SUPI(bitstring, pubKey, pubKey).        (*SUPI, ue_pubkey, hn_pubkey*)
+   event endUE_HN_SUPI(bitstring, pubKey, pubKey).          (*SUPI, ue_pubkey, hn_pubkey*)
+   event beginHN_UE_MAC(bitstring, key, bitstring, seq).    (*SUPI, K, RAND, SQN*)
+   event endUE_HN_MAC(bitstring, key, bitstring, seq).      (*SUPI, K, RAND, SQN*)
+   event beginUE_RES(bitstring, key, bitstring, seq).       (*SUPI, K, RAND, SQN*)
+   event middleSN_RES(bitstring, bitstring).                (*RES'*)
+   event middleHN_RES(bitstring, key, bitstring, seq).      (*SUPI, K, RAND, SQN*)
+   event endSN_ANCHOR_KEY(bitstring, key).                  (*SUPI, KSEAF*)
+   
+   event MACFailure().
+   event SYNCFailure().
+   
+   (* 기밀성 *)
+   free supi_test:   bitstring [private].
+   free kseaf_test:  bitstring [private].
+   free kausf_test:  bitstring [private].
+   query attacker(supi_test).
+   query attacker(kseaf_test).
+   query attacker(kausf_test).
+  
+   (* authentication *)
+   query supi: bitstring, uepk: pubKey, hnpk: pubKey; (* UE-HN SUPI 검증 *)
+   inj-event(endUE_HN_SUPI(supi, uepk, hnpk))
+   ==> inj-event(beginUE_HN_SUPI(supi, uepk, hnpk)).
+   query supi: bitstring, k: key, rand: bitstring, sqn: seq; (* UE-HN MAC 검증 *)
+   inj-event(endUE_HN_MAC(supi, k, rand, sqn))
+   ==> inj-event(beginHN_UE_MAC(supi, k, rand, sqn)).
+   query supi: bitstring, k: key, rand: bitstring, sqn: seq, res': bitstring, kseaf: key; (* UE-SN RES 검증 *)
+   inj-event(endSN_ANCHOR_KEY(supi, kseaf))
+   ==> (inj-event(middleHN_RES(supi, k, rand, sqn)) ==> 
+         (inj-event(middleSN_RES(res', rand)) ==> 
+            inj-event(beginUE_RES(supi, k, rand, sqn))
+         )
+       ).
+
+   letfun calc_ue_suci(skue: secKey, supi: bitstring, pkhn: pubKey) =
+      let c0_ret  = pk(skue) in (* C0 *)
+      let mk      = KDF(k2b(DHkey(skue, pkhn))) in
+      let k1      = fP_k1(mk) in
+      let c1_ret  = senc(supi, k1) in (* C1 *)
+      let k2      = fP_k2(mk) in 
+      let c2_ret  = hmac(k2, c1_ret) in (* C2 *) 
+         (c0_ret, c1_ret, c2_ret).
+
+   letfun get_hn_keys4supi(skhn: secKey, c0: pubKey, c1: bitstring, c2: bitstring) =
+      let pkhn    = pk(skhn)    in
+      let mk      = KDF(k2b(DHkey(skhn, c0))) in
+      let k1      = fP_k1(mk) in
+      let k2      = fP_k2(mk) in 
+          (k1, k2).
+
+   letfun calc_hn_supi(skhn: secKey, c0: pubKey, c1: bitstring, c2: bitstring) =
+      let pkhn    = pk(skhn)    in
+      let mk      = KDF(k2b(DHkey(skhn, c0))) in
+      let k1      = fP_k1(mk) in
+      let k2      = fP_k2(mk) in
+      if c2  = hmac(k2, c1) then (* suci mac verification*)
+      (
+         let supi_ret = sdec(c1, k1) in (* gettting SUPI *)
+            (supi_ret)
+      ).
+
+   letfun calc_hn_mac(rand: bitstring, k: key, sqn: seq, amf: bitstring) =       
+      let rand_    = xor(rand, k2b(k)) in (* xor(rand,k) 치환 *)
+      let ak_ret   = f5(rand_) in
+      let conc_ret = xor(seq2b(sqn), ak_ret) in(* AUTN = CONC,AMF,hMAC *)
+      let mac_ret  = f1(rand_, seq2b(sqn), amf) in
+         (conc_ret, ak_ret, mac_ret).
+
+   letfun calc_ue_mac(rand: bitstring, k: key, conc: bitstring, amf: bitstring) =       
+      let rand__  = xor(rand, k2b(k)) in (* xor(RAND,K) 치환 *)
+      let ak_ret  = f5(rand__) in
+      let sqn_ret = xor(conc, ak_ret) in
+      let mac_ret = f1(rand__, sqn_ret, amf) in
+         (mac_ret, sqn_ret, ak_ret).
+
+   letfun calc_AV(mac:bitstring, amf: bitstring, rand: bitstring, k: key, sqn: seq, ak: bitstring, pk:pubKey) =       
+      let rand__     = xor(rand, k2b(k)) in (* xor(RAND,K) 치환 *)
+      let RES        = f2(rand__) in    
+      let CK         = f3(rand__) in
+      let IK         = f4(rand__) in
+      let CK'        = k2b(KDF((CK,IK, SNname, xor(seq2b(sqn), ak)))) in
+      let IK'        = k2b(KDF((CK,IK, SNname, xor(seq2b(sqn), ak)))) in
+      let kAUT       = KDF((CK,IK, SNname, xor(seq2b(sqn), ak))) in
+      let AT_MAC_ret = hmac(kAUT, (rand, sqn, amf, mac, RES, pk)) in
+      let RES'_ret   = k2b(KDF((CK', IK', SNname, rand, RES))) in                               
+      let HXRES'_ret = sha256((rand, RES'_ret)) in
+         (RES, kAUT, RES'_ret, HXRES'_ret, IK', CK', AT_MAC_ret).
+
+   (* The process at the UE *)
+   let UE(ueSUPI: bitstring, ueK: key, sqn: seq, pkHN: pubKey)=  
+      new skUE: secKey;
+
+      let (c0: pubKey, c1: bitstring, c2: bitstring) = calc_ue_suci(skUE, ueSUPI, pkHN) in
+      ( 
+         event beginUE_HN_SUPI(ueSUPI, c0, pkHN);
+         out(usch, (c0, c1, c2)); (* SUCI<-(C0,C1,C2) *) (*1*)
+         in(usch, (RAND_ue: bitstring, CONC_ue: bitstring, AMF_ue: bitstring, MAC_ue: bitstring, upkHN:pubKey, hAT_MAC: bitstring));(*4*)
+
+         new uskUE: secKey;
+         let upkUE = pk(uskUE) in
+         let DHK = DHkey(uskUE, upkHN) in
+         let (uMAC: bitstring, hnSQN: bitstring, uAK: bitstring) = calc_ue_mac(RAND_ue, ueK, CONC_ue, AMF_ue) in
+         (
+            if uMAC = MAC_ue then (*MAC verification*)
+            (
+               let ueSQN = calc_sqn(sqn, c0, RAND_ue) in
+               if hnSQN = seq2b(ueSQN) then
+               (
+                  event endUE_HN_MAC(ueSUPI, ueK, RAND_ue, ueSQN);
+                  event beginUE_RES(ueSUPI, ueK, RAND_ue, ueSQN);
+                  let (RES: bitstring, kAUT: key, RES': bitstring, HXRES': bitstring, IK': bitstring, CK': bitstring, uAT_MAC: bitstring) = calc_AV(MAC_ue, AMF_ue, RAND_ue, ueK, ueSQN, uAK, upkUE) in      
+                  if hAT_MAC = hmac(kAUT, (RAND_ue, ueSQN, AMF_ue, MAC_ue, RES, upkHN)) then (*AT_MAC verification*)
+                  (
+                    
+                    let MK_ECDHE  = k2b(KDF((CK', IK', DHK))) in
+                    let kAUSF     = KDF((MK_ECDHE)) in
+                    let kSEAF     = KDF((kAUSF, SNname)) in
+                    out(usch, (RES', upkUE, uAT_MAC)); 
+                    out(usch, senc(supi_test, b2k(ueSUPI)));
+                    out(usch, senc(kausf_test, kAUSF));
+                    out(usch, senc(kseaf_test, kSEAF))
+                  )
+               )
+               else
+                  event SYNCFailure()
+            )
+            else 
+               event MACFailure()
+         )
+      ). 
+    
+   (* The process at the SN -------------------------------------------------------------- *)
+   let SN(SNname: bitstring)=
+      new dsch: channel;
+      out(sch, (dsch));
+      in (usch, (c0_sn: pubKey, c1_sn: bitstring, c2_sn: bitstring));(*1*)
+      out(dsch, (c0_sn, c1_sn, c2_sn, SNname));(*2*)
+      in(dsch, (RAND_sn: bitstring, CONC_sn: bitstring, AMF_sn: bitstring, MAC_sn: bitstring, HXRES'_sn: bitstring, spkHN:pubKey, hAT_MAC: bitstring));(*3*)
+      out(usch, (RAND_sn, CONC_sn, AMF_sn, MAC_sn, spkHN, hAT_MAC));(*4*)
+      in(usch, (RES'_sn: bitstring, spkUE: pubKey, uAT_MAC: bitstring));(*5*)
+
+      if sha256((RAND_sn, RES'_sn)) = HXRES'_sn then
+      (
+         event middleSN_RES(RES'_sn, RAND_sn);
+         out(dsch, (RES'_sn, spkUE, uAT_MAC));(*6*)
+         in(dsch, (SUPI_sn: bitstring, kSEAF_sn: key)); (*7*)
+         event endSN_ANCHOR_KEY(SUPI_sn, kSEAF_sn)      
+      ).
+
+   (* The process at the HN -------------------------------------------------------------- *)
+   let HN(ueSUPI: bitstring, skHN: secKey)=
+      in(sch, (dsch: channel));
+      in(dsch, (c0_hn: pubKey, c1_hn: bitstring, c2_hn: bitstring, SNname_hn: bitstring));(*2*)
+      new hRand: bitstring; (* 5G-AKA RAND 임의로 생성된 128비트 값 *)
+      let (k1: key, k2: key) = get_hn_keys4supi(skHN, c0_hn, c1_hn, c2_hn) in
+      if c2_hn = hmac(k2, c1_hn) then (* suci mac verification*)
+      (
+         let hSUPI = sdec(c1_hn, k1) in (* gettting SUPI *)
+         (
+            if ueSUPI = hSUPI then
+            (
+               event endUE_HN_SUPI(hSUPI, c0_hn, pk(skHN));
+               get ueDB(=hSUPI, ueK, sqn) in 
+               (
+                  let hSQN = calc_sqn(sqn, c0_hn, hRand) in 
+                  let (CONC: bitstring, AK: bitstring, hMAC: bitstring) = calc_hn_mac(hRand, ueK, hSQN, AMF) in                 
+                  new hskHN: secKey;
+                  let hpkHN =  pk(hskHN) in
+                  let (RES:bitstring, kAUT: key, XRES': bitstring, HXRES': bitstring, IK': bitstring, CK':bitstring, hAT_MAC: bitstring) = calc_AV(hMAC, AMF, hRand, ueK, hSQN, AK, hpkHN) in
+                  (
+                     event beginHN_UE_MAC(hSUPI, ueK, hRand, hSQN);       
+                     out(dsch, (hRand, CONC, AMF, hMAC, HXRES', hpkHN, hAT_MAC));(*3*)
+                     in(dsch, (RES_hn: bitstring, hpkUE: pubKey, uAT_MAC: bitstring));(*6*)
+                     if RES_hn = XRES' then
+                     (
+                        if uAT_MAC = hmac(kAUT, (hRand, hSQN, AMF, hMAC, RES, hpkUE)) then
+                        (
+                            let DHK = DHkey(hskHN, hpkUE) in
+                            let MK_ECDHE  = k2b(KDF((CK', IK', DHK))) in
+                            let kAUSF     = KDF((MK_ECDHE)) in
+                            let kSEAF     = KDF((kAUSF, SNname)) in
+                            event middleHN_RES(hSUPI, ueK, hRand, hSQN);   
+                            out(dsch, (hSUPI, kSEAF))                                
+                        )
+                     )
+                     (*7*)
+                  )
+               )
+            )   
+         )      
+      ).      
+
+   (* – Main Process – *)
+   process      
+      new prHN: secKey; let puHN = pk(prHN) in out(usch, puHN); 
+      new SUPI: bitstring; new K: key;  
+      new SQN: seq;
+      
+      insert ueDB(SUPI, K, SQN);
+      (!UE(SUPI, K, SQN, puHN))|
+      (!SN(SNname))|
+      (!HN(SUPI, prHN))|
+      phase 1; out(usch, (prHN, K))
