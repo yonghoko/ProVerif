@@ -1,0 +1,204 @@
+type pubKey.
+type secKey.
+free sch: channel[private].
+free usch: channel.
+free k: bitstring [private].
+free skHN: secKey [private].
+free kseafUE, kseafSN, kseafHN: bitstring [private]. 
+free SUPI: bitstring [private].
+free SNname: bitstring.
+free debugUE, debugSN, debugHN: bitstring [private]. 
+query attacker (debugUE).
+query attacker (debugSN).
+query attacker (debugHN).
+
+fun f(pubKey, bitstring): bitstring.
+fun f1(bitstring): bitstring.
+fun f2(bitstring): bitstring.
+fun f3(bitstring): bitstring.
+fun f4(bitstring): bitstring.
+fun f5(bitstring): bitstring.
+fun SHA(bitstring): bitstring.
+fun pk(secKey): pubKey.
+fun getkey(bitstring): bitstring.
+
+fun senc(bitstring, bitstring): bitstring.
+reduc forall m: bitstring, n: bitstring; 
+sdec(senc(m, n), n) = m.
+fun keyseed(bitstring): bitstring.
+
+(* XOR *)
+fun xor(bitstring, bitstring): bitstring.
+equation forall m: bitstring, n: bitstring;
+ xor(xor(m, n), n) = m.
+
+(* Key Encapsulation Mechanism*)
+fun Encaps(pubKey, bitstring): bitstring.
+    (* Encaps takes the pk and a freshly generated random number. 
+     Note that by definition Encaps is a probabilistic algorithm *)
+fun KEMkey(bitstring): bitstring.
+     (* takes Encaps as input and outputs the shared KEM key*)
+fun KEMCipher(bitstring): bitstring.
+     (* takes Encaps as input and outputs the KEM ciphertext*)
+fun DecapsKey(secKey, bitstring): bitstring.
+     (* takes the KEM secret key and ciphertext and outputs the KEM shared key*)
+
+(* The KEM is given by the following equations *)
+equation forall sk: secKey, r: bitstring;
+DecapsKey(sk, KEMCipher(Encaps(pk(sk), r))) = KEMkey(Encaps(pk(sk), r)).
+
+(* EVENT *)
+    (* for Q1 *)
+event UESendReqSN(bitstring). 
+event SNSendReqHN(bitstring).
+event HNRecReqSN(bitstring).
+    (* for Q2 *)
+event HNSendResSN(bitstring).
+event SNRecResHN(bitstring).
+event UERecResSN(bitstring).
+    (* for Q3 *)
+event UESendConSN(bitstring).
+event SNRecConUE(bitstring).
+event HNRecConSN(bitstring).
+    (* for Q4 *)
+event SNKeyObtn(bitstring).
+
+(* The process at the UE *)
+
+let UE(SUPI: bitstring, idHN: bitstring, pkHN: pubKey, k: bitstring, SNname: bitstring)=
+    (* Key Encapsulation *)
+    new rUE: bitstring;     
+    let Ks1 = KEMkey(Encaps(pkHN, rUE)) in
+    let c1  = KEMCipher(Encaps(pkHN, rUE)) in
+        
+    (* generate a pair of KEM pk/sk *)
+    new skUE: secKey; 
+    let pkUE = pk(skUE) in 
+    let USUCI = senc((SUPI, pkUE, SNname), Ks1)in
+    let MAC1 = f1((USUCI, Ks1)) in
+    event UESendReqSN(MAC1);
+    out(usch,(c1, USUCI, MAC1, idHN));
+(* End of Identification request material *)
+    in(usch, (uc2: bitstring, UCONC: bitstring, uMAC2: bitstring));
+    (* Decapsulation at UE *)
+    let UKs2 = DecapsKey(skUE, uc2) in
+    let urSN = xor(UCONC, f5((k, UKs2))) in
+    if uMAC2 = f1((k, UKs2, urSN)) then
+    (
+        event UERecResSN(uMAC2);
+        let URES = f2((k, UKs2)) in
+        let UCK  = f3((k, UKs2)) in
+        let UIK  = f4((k, UKs2)) in 
+        let URESstar = keyseed((UCK, UIK, UKs2, URES, SNname)) in
+        let HXRES = SHA((URESstar, urSN)) in
+        let UkAUSF = keyseed((UCK, UIK, UKs2, UCONC, SNname)) in
+        let UkSEAF = keyseed((UkAUSF, SNname)) in
+        event UESendConSN(URESstar);
+        out(usch, URESstar);
+        out(usch, senc(kseafUE, UkSEAF));
+        out(usch, debugUE)
+    ). 
+ 
+(* The process at the SN *)
+
+let SN(SNname:bitstring)=
+    in(usch,(sc1: bitstring, sUSUCI: bitstring, sMAC1: bitstring, sidHN: bitstring));
+    new rSN: bitstring;
+    new ssID: bitstring;
+    event SNSendReqHN(sMAC1);
+    out(sch,(ssID, sc1, sUSUCI, sMAC1, SNname, rSN));
+(* End of the first phase *)
+    in(sch,(=ssID, sc2: bitstring, sHXRES: bitstring, sM: bitstring, sCONC: bitstring, sMAC2: bitstring, sCONC2: bitstring));
+    (*CONC2 = xor(f5((hk, Ks2)), hrSN)*)
+    event SNRecResHN(sMAC2);
+    out(usch,(sc2, sCONC, sMAC2));
+(* SN sent AUTN to UE *)
+    in(usch, URESstar: bitstring);
+    if sHXRES = SHA((URESstar, rSN)) then
+    (
+        event SNRecConUE(URESstar);
+        let sAK = xor(sCONC2, rSN) in
+        let sK3 = xor(URESstar, sAK) in
+        let (skSEAF: bitstring, sSUPI: bitstring) = sdec(sM, sK3) in
+        event SNKeyObtn((skSEAF, sSUPI));
+        out(sch,(ssID, URESstar));
+        out(usch, senc(kseafSN, skSEAF));
+        out(usch, debugSN)
+    ).
+
+(* The process at the HN *)
+        (* Identification phase *)
+
+let HN(hk: bitstring, skHN: secKey, idHN: bitstring)=
+    in(sch,(ssID: bitstring, hc1: bitstring, hUSUCI: bitstring, hMAC1: bitstring, hSNname': bitstring, hrSN: bitstring));
+(* Decapsulation *)
+    let hKs1 = DecapsKey(skHN, hc1) in
+    let (hSUPI: bitstring, hpkUE: pubKey, hSNname: bitstring) = sdec(hUSUCI, hKs1) in
+    if hSNname = hSNname' then
+    (
+        if hMAC1 = f1((hUSUCI, hKs1)) then
+        (
+            event HNRecReqSN(hMAC1);
+
+            (* Encapsulation at the HN*)
+            new rHN: bitstring;   
+            let Ks2 = KEMkey(Encaps(hpkUE, rHN)) in
+            let c2  = KEMCipher(Encaps(hpkUE, rHN)) in
+
+            (* Authentication vector at HN *)
+            let MAC2    = f1((hk, Ks2, hrSN)) in
+            let XRES    = f2((hk, Ks2)) in
+            let CONC    = xor(hrSN, f5((hk, Ks2))) in
+            let CONC2   = xor(f5((hk, Ks2)), hrSN) in
+            let CK      = f3((hk, Ks2)) in
+            let IK      = f4((hk, Ks2)) in
+            let XRESstar = keyseed((CK, IK, Ks2, XRES, hSNname)) in
+            let HXRES   = SHA((XRESstar, hrSN)) in
+            let kAUSF   = keyseed((CK, IK, Ks2, CONC, hSNname)) in
+            let kSEAF   = keyseed((kAUSF, hSNname)) in
+            let K3      = xor(XRESstar, f5((hk, Ks2))) in
+            let M       = senc((kSEAF, hSUPI), K3) in
+            event HNSendResSN(MAC2);
+            out(sch,(ssID, c2, HXRES, M, CONC, MAC2, CONC2));
+            (* End of Authentication material generation *)
+            in(sch, (=ssID, URESstar: bitstring));
+            if XRESstar = URESstar then
+            (
+                event HNRecConSN(URESstar);                    
+                out(usch, senc(kseafHN, kSEAF));
+                out(usch, debugHN)
+            )
+        )
+    ).
+    
+   
+(*-Query---------------------------------------------------------------------------*)
+
+query attacker(skHN).
+query attacker(k).
+query attacker (SUPI).
+query attacker (kseafUE).
+query attacker (kseafSN).
+query attacker (kseafHN).
+
+query mac: bitstring;
+inj-event(HNRecReqSN(mac)) ==> (inj-event(SNSendReqHN(mac)) ==> inj-event(UESendReqSN(mac))).
+
+query mac: bitstring;
+inj-event(UERecResSN(mac)) ==> (inj-event(SNRecResHN(mac)) ==> inj-event(HNSendResSN(mac))).
+
+query rstar: bitstring;
+inj-event(HNRecConSN(rstar)) ==> (inj-event(SNRecConUE(rstar)) ==> inj-event(UESendConSN(rstar))).
+
+query rstar: bitstring, key: bitstring;
+inj-event(SNKeyObtn(key)) ==> (inj-event(HNRecConSN(rstar)) ==> inj-event(UESendConSN(rstar))).
+(*---------------------------------------------------------------------------------*)
+
+process
+
+new idHN: bitstring;
+let pkHN = pk(skHN) in
+out(usch, pkHN);
+(!UE(SUPI, idHN, pkHN, k, SNname)|!SN(SNname)|!HN(k, skHN, idHN)
+    | phase 1; out(usch, (skHN, k, SUPI))
+)
