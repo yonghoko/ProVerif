@@ -1,0 +1,231 @@
+set ignoreTypes= false.
+
+(* Symmetric key encryption & Hash *)
+type key.
+fun senc(bitstring, key): bitstring.
+reduc forall m: bitstring, k: key; sdec(senc(m,k),k) = m.
+
+(* Diffie-Hellman *)
+type G.
+type exponent.
+
+const g: G.
+fun exp(G, exponent): G.
+equation forall x: exponent, y: exponent; exp(exp(g, x), y) = exp(exp(g, y), x).
+
+(* Mac & Hash & Conversion*)
+fun hmac(key, bitstring): bitstring.
+fun hash(bitstring): bitstring.
+fun k2b(key): bitstring [data, typeConverter].
+fun b2k(bitstring): key [data, typeConverter].
+fun g2b(G): bitstring [data, typeConverter].
+fun g2k(G): key [data, typeConverter].
+fun length(bitstring): bitstring.
+
+(* KDF *)
+fun kdf(bitstring): key.
+
+(* AEAD *)
+       (* aead_enc(key, associated_data, plain_text) *)
+fun aead_enc(key, bitstring, bitstring): bitstring.
+       (* aead_dec(key, associated_data, cipher_text) *)
+fun aead_dec(key, bitstring, bitstring): bitstring
+reduc forall k: key, p: bitstring, ad: bitstring;
+    aead_dec(k, ad, aead_enc(k, ad, p)) = p.
+
+(********************************************************)
+(*  TLS 1.3 Key Schedule  *)
+(********************************************************)
+type label.
+type keyid.
+type entid.
+
+fun l2b(label): bitstring [data, typeConverter].
+fun eid2b(entid): bitstring [data, typeConverter].
+const tls13_version, psk_ke, psk_dhe_ke, early_data, end_of_early_data: label.
+const client_finished, server_finished, master_secret, 
+      client_key_expansion, server_key_expansion: label.
+const tls13_derived,
+      tls13_client_handshake_traffic_secret, 
+      tls13_server_handshake_traffic_secret, 
+      tls13_client_early_traffic_secret, 
+      tls13_client_application_traffic_secret, 
+      tls13_server_application_traffic_secret, 
+      tls13_key, tls13_iv, 
+      tls13_early_exporter_master_secret, 
+      tls13_exporter_master_secret, 
+      tls13_resumption_master_secret, 
+      tls13_resumption_psk_binder_key,
+      tls13_finished: label.
+const zero, derived: bitstring.
+
+letfun prf(k: key, x: bitstring) = 
+       hmac(k, x).
+
+letfun hkdf_extract(s: key, k: bitstring) =
+       prf(s,k).
+
+letfun hkdf_expand_label(k: key, l: label, h: bitstring) = 
+       prf(k, (l, h)).       							  
+ 
+letfun derive_secret(k:key, l:label, m:bitstring) = 
+       hkdf_expand_label(k, l, hash(m)).
+
+letfun ue_gen_client_hello_psk_dhe_ke(pre_shared_key: keyid, es: key, psk_key_exchange_modes: label) =
+       if psk_key_exchange_modes = psk_dhe_ke then
+       ( 
+              new crand: bitstring;
+              new x: exponent; 
+              let c_key_share  = exp(g, x) in
+              let client_hello_msg = (tls13_version, crand, c_key_share, pre_shared_key, psk_key_exchange_modes) in
+              let bk = b2k(derive_secret(es, tls13_resumption_psk_binder_key, length(client_hello_msg))) in
+              let binder = hmac(bk, hash(client_hello_msg)) in
+              (x, c_key_share, crand, binder, client_hello_msg)
+       ).
+
+letfun af_gen_server_hello_psk_dhe_ke(pre_shared_key: keyid, c_key_share: G, psk_key_exchange_modes: label) =
+       if psk_key_exchange_modes = psk_dhe_ke then
+       ( 
+              new srand: bitstring;
+              new y: exponent; 
+              let s_key_share  = exp(g, y) in
+              let s_dhe = g2k(exp(c_key_share, y)) in
+              let server_hello_msg = (tls13_version, srand, s_key_share, pre_shared_key, psk_key_exchange_modes) in
+              (srand, s_dhe, server_hello_msg)
+       ).
+
+letfun key_gen_psk_dhe_ke(es: key, s_dhe: key, msg1: bitstring) =
+       let hs = b2k(hkdf_extract(s_dhe, derive_secret(es, tls13_derived, zero))) in
+       let tk_chs = b2k(derive_secret(hs, tls13_client_handshake_traffic_secret, msg1)) in
+       let tk_shs = b2k(derive_secret(hs, tls13_server_handshake_traffic_secret, msg1)) in
+       let fk_s = b2k(hkdf_expand_label(tk_shs, tls13_finished, zero)) in 
+       let fk_c = b2k(hkdf_expand_label(tk_chs, tls13_finished, zero)) in 
+       let s_finished = hmac(fk_s, msg1) in
+       let msg2 = (msg1, s_finished) in 
+       let ms = b2k(hkdf_extract(b2k(zero), derive_secret(hs, tls13_derived, zero))) in
+       let tk_capp = b2k(derive_secret(ms, tls13_client_application_traffic_secret, msg2)) in
+       let tk_sapp = b2k(derive_secret(ms, tls13_server_application_traffic_secret, msg2)) in
+       (tk_chs, tk_shs, fk_s, fk_c, tk_capp, tk_sapp, s_finished).
+
+(********************************************************)
+(*  TLS 1.3 PSK-ECDHE: Body *)
+(********************************************************)
+free c: channel.
+free sp: channel [private]. 
+free app_data1, app_data2: bitstring [private].
+
+(********************************************************)
+(*  AKMA  *)
+(********************************************************)
+table aanf_key_db(keyid, key, entid). (*a-kid, k_akma, supi*)
+
+const  akma_0x82, akma_0x81: label.
+
+(* Authentication queries *)
+event S_STEP1_C_to_S(keyid, key, bitstring, bitstring, bitstring).
+event E_STEP1_C_to_S(keyid, bitstring, bitstring, bitstring).
+event S_STEP2_S_to_C(key, bitstring).
+event E_STEP2_S_to_C(key, bitstring).
+event S_STEP3_C_to_S(key, bitstring).
+event E_STEP3_C_to_S(key, bitstring).
+
+query kid: keyid, psk: key, rand: bitstring, binder: bitstring, client_hello: bitstring;
+       inj-event(E_STEP1_C_to_S(kid, rand, binder, client_hello)) ==> inj-event(S_STEP1_C_to_S(kid, psk, rand, binder, client_hello)).
+
+query kid: keyid, k: key, lb_finished: label, aead_finished: bitstring;
+       inj-event(E_STEP2_S_to_C(k, aead_finished)) ==> inj-event(S_STEP2_S_to_C(k, aead_finished)).
+
+query k: key, aead_finished: bitstring, app_ad: bitstring;
+       inj-event(E_STEP3_C_to_S(k, aead_finished)) ==> inj-event(S_STEP3_C_to_S(k, aead_finished)).
+
+(* Secrecy assumptions *)
+query attacker(app_data1).
+query attacker(app_data2).
+
+let proc_AAnF() =
+(*STEP1*)
+       in(sp, (ss_id: bitstring, a_kid: keyid, af_id: entid));
+       get aanf_key_db(=a_kid, k_akma, supi) in
+       let k_af  = b2k(prf(k_akma, (l2b(akma_0x82), eid2b(af_id), length(eid2b(af_id))))) in
+       out(sp, (ss_id, k_af, supi)).
+
+let proc_UE(supi: entid, a_kid: keyid, k_akma: key, af_id: entid) =
+(*STEP1*)
+       let k_af  = b2k(prf(k_akma, (l2b(akma_0x82), eid2b(af_id), length(eid2b(af_id))))) in (*K_AF is PSK*)
+       let es = b2k(hkdf_extract(k_af, zero)) in
+       let (x: exponent, c_key_share: G, crand: bitstring, c_binder: bitstring, client_hello: bitstring) = ue_gen_client_hello_psk_dhe_ke(a_kid, es, psk_dhe_ke) in
+       (
+              event S_STEP1_C_to_S(a_kid, k_af, crand, c_binder, client_hello);
+              out(c, (client_hello, c_binder)); (*Sending ClientHello Message*)
+(*STEP2*)                            
+              in(c, ((tls13_version: label, srand: bitstring, s_key_share: G, pre_shared_key: keyid, psk_key_exchange_modes: label), e_sfinished: bitstring, e_app_data1: bitstring));
+              let server_hello = (tls13_version, srand, s_key_share, pre_shared_key, psk_key_exchange_modes) in
+              let msg1 = (client_hello, server_hello) in
+              let c_dhe = g2k(exp(s_key_share, x)) in
+              let (tk_chs: key, tk_shs: key, fk_s: key, fk_c: key, tk_capp: key, tk_sapp: key, s_finished: bitstring) = key_gen_psk_dhe_ke(es, c_dhe, msg1) in
+              
+              if aead_dec(tk_shs, l2b(server_finished), e_sfinished) = s_finished then
+              (
+(*STEP3*)                                   
+                     event E_STEP2_S_to_C(tk_shs, e_sfinished);
+                     let app_data1 = aead_dec(tk_sapp, (crand, srand, c_dhe), e_app_data1) in
+                     (
+                            let c_finished = hmac(fk_c, (msg1, e_sfinished)) in
+                            let e_cfinished = aead_enc(tk_chs, l2b(client_finished), c_finished) in
+                            let e_app_data2 = aead_enc(tk_capp, (crand, srand, c_dhe), app_data2) in 
+                            event S_STEP3_C_to_S(tk_chs, e_cfinished);
+                            out(c, (e_cfinished, e_app_data2))      
+                     )                                               
+              )                   
+
+       ).  
+
+let proc_AF(af_id: entid) =
+(*STEP1*)
+       in(c, ((tls_ver: label, crand: bitstring, c_key_share: G, pre_shared_key: keyid, psk_key_exchange_modes: label), s_binder: bitstring));
+       if (tls_ver = tls13_version) && (psk_key_exchange_modes = psk_dhe_ke) then
+       (
+              let c_hello = (tls_ver, crand, c_key_share, pre_shared_key, psk_key_exchange_modes) in
+(*STEP2*)     
+              new ss_id: bitstring;   
+              out(sp, (ss_id, pre_shared_key, af_id));
+              in(sp, (recv_ss_id: bitstring, k_af: key, ue_supi: entid));
+              if recv_ss_id = ss_id then
+              (
+                     let es = b2k(hkdf_extract(k_af, zero)) in
+                     let bk = b2k(derive_secret(es, tls13_resumption_psk_binder_key, length(c_hello))) in
+                     if (s_binder = hmac(bk, hash(c_hello))) then
+                     (
+                            event E_STEP1_C_to_S(pre_shared_key, crand, s_binder, c_hello);
+                            let (srand: bitstring, s_dhe:key, s_hello: bitstring) 
+                            = af_gen_server_hello_psk_dhe_ke(pre_shared_key, c_key_share, psk_key_exchange_modes) in
+                            let msg1 = (c_hello, s_hello) in 
+                            let (tk_chs: key, tk_shs: key, fk_s: key, fk_c: key, tk_capp: key, tk_sapp: key, s_finished: bitstring) 
+                            = key_gen_psk_dhe_ke(es, s_dhe, msg1) in 
+                            let e_sfinished = aead_enc(tk_shs, l2b(server_finished), s_finished) in 
+                            let e_app_data1 = aead_enc(tk_sapp, (crand, srand, s_dhe), app_data1) in  
+                            event S_STEP2_S_to_C(tk_shs, e_sfinished);   
+                            out(c, (s_hello, e_sfinished, e_app_data1));
+(*STEP3*)       
+                            in(c, (e_cfinished: bitstring, e_app_data2: bitstring));
+
+                                   if aead_dec(tk_chs, l2b(client_finished), e_cfinished) = hmac(fk_c, (msg1, e_sfinished)) then
+                                   (
+                                          event E_STEP3_C_to_S(tk_chs, e_cfinished);
+                                          let app_data2 = aead_dec(tk_capp, (crand, srand,  s_dhe), e_app_data2) in
+                                          out(c, e_app_data2)
+                                   )
+                     )
+                     
+              )
+       ).
+       
+
+process 
+       new supi: entid; new k_akma: key; new a_kid: keyid;
+       new af_id: entid;
+
+       insert aanf_key_db(a_kid, k_akma, supi);
+       ( (!proc_UE(supi, a_kid, k_akma, af_id)) | (!proc_AF(af_id)) | (!proc_AAnF()) |
+       phase 1; out(c, (k_akma, af_id))
+       )
