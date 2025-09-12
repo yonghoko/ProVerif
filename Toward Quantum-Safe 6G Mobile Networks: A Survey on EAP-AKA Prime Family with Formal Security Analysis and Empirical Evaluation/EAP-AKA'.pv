@@ -1,0 +1,285 @@
+(*------------Declaration-------------*)
+
+free sch: channel[private]. (*secure channel*)
+free usch : channel. (*unsecure channel*)
+
+const SNname, AMF : bitstring. (*SNname, AMF를 전역 변수로*)
+
+set color = true.
+
+(*Symmetric key encryption*)
+type key. (*대칭키*)
+fun senc(key, bitstring): bitstring.
+reduc forall k: key, m: bitstring; sdec(k, senc(k, m)) = m.
+
+
+(*Symmetric key encryption CTR mode*)
+type ictr. (*initial Counter Block*)
+fun senc_CTR(key, bitstring, ictr): bitstring.
+reduc forall k: key, m: bitstring, ctr: ictr; sdec_CTR(k, senc_CTR(k, m, ctr), ctr) = m.
+
+
+(*Assymetric key encryption*)
+type pkey. (*공개키*)
+type skey. (*개인키*)
+fun pk(skey): pkey.
+fun aenc(skey, bitstring): bitstring.
+reduc forall sk: skey, m: bitstring; adec(pk(sk), aenc(sk, m)) = m.
+
+
+(*DH Key-exchange*)
+fun DHkey(pkey, skey): key.
+equation forall sk1: skey, sk2: skey;
+DHkey(pk(sk2), sk1) = DHkey(pk(sk1), sk2).
+
+
+(*A Key Derivation Function*)
+fun KDF(bitstring): key. 
+fun PRF(bitstring): bitstring.
+fun PF_EK(key): key. (*EncyrptKey Parsing Function*)
+fun PF_ICB(key): ictr. (*ICB Parsing Function*)
+fun PF_MacK(key): key. (*MacK Parsing Function*)
+
+(*HMAC*)
+fun HMAC(key, bitstring): bitstring.
+
+(*SQN Increase Function*)
+fun calc_sqn(bitstring, pkey, bitstring): bitstring. (*SQN+1*)
+
+(*XOR*)
+fun XOR(bitstring, bitstring): bitstring.
+equation forall a: bitstring, b: bitstring; XOR(XOR(a,b),b) = a.
+
+(*SHA-256*)
+fun SHA256(bitstring): bitstring.
+
+(*TRUNCATION*)
+fun LEFT256(bitstring) : bitstring.
+
+(*f1, f2, f3, f4, f5*)
+fun f1(key, bitstring, bitstring, bitstring): bitstring. (*f1(key, SQNHN, RAND, AMF) : MAC1, MAC2*)
+fun f2(key, bitstring): bitstring. (*f2(key, RAND): RES, XRES*)
+fun f3(key, bitstring): bitstring. (*f3(key, RAND): CK*)
+fun f4(key, bitstring): bitstring. (*f4(key, RAND): IK*)
+fun f5(key, bitstring): bitstring. (*f5(key, RAND): AK*)
+
+(*Type Converter*)
+fun b2k(bitstring): key[data, typeConverter].
+fun k2b(key): bitstring[data, typeConverter].
+
+
+
+(*--------------------- Event and Query ------------------------*)
+
+(*HN이 SUPI 검증 => 허용할 수 있는 SUPI인가?*)
+event beginUE_HN_SUPI(bitstring, pkey, pkey). (*SUPI, ue_pubkey, hn_pubkey*)
+event endUE_HN_SUPI(bitstring, pkey, pkey). (*SUPI, ue_pubkey, hn_pubkey*)
+query SUPI: bitstring, ue_pubkey: pkey, hn_pubkey: pkey;
+inj-event(endUE_HN_SUPI(SUPI, ue_pubkey, hn_pubkey)) ==> inj-event(beginUE_HN_SUPI(SUPI, ue_pubkey, hn_pubkey)).
+
+
+(*UE가 MAC과 SQN, MAC-AKA_Challenge_Req 기반하여 HN(5G Core) 인증*)
+event beginHN_UE_MAC(bitstring, bitstring, bitstring, key). (*SUPI, K, RAND, SQN*)
+event endHN_UE_MAC(bitstring, bitstring, bitstring, key). (*SUPI, K, RAND, SQN*)
+query SUPI: bitstring, K: bitstring, rand: bitstring, sqn: key;
+inj-event(endHN_UE_MAC(SUPI, K, rand, sqn)) ==> inj-event(beginHN_UE_MAC(SUPI, K, rand, sqn)).
+
+
+(*HN이 MAC 기반하여 UE 인증 & RES = HXRES 확인을 통해 UE 인증 & 인증 성공적 완성*)
+event beginUE_HN_RES(bitstring, bitstring, bitstring, key). (*SUPI, K, RAND, SQN*)
+event middleUE_HN_RES(bitstring, bitstring, bitstring, key). (*SUPI, K, RAND, SQN*)
+query SUPI: bitstring, rand: bitstring, sqn: bitstring, K: key, KSEAF: key;
+(inj-event(middleUE_HN_RES(SUPI, rand, sqn, K)) ==> inj-event(beginUE_HN_RES(SUPI, rand, sqn, K))).
+
+(*failure event*)
+event SYNCFailure().
+event MACFailure().
+event UEauth2HN_Fail().
+event RES_Fail().
+event SUCI_denial().
+event SUCI_MacFail().
+
+(*기밀성*)
+free secretKAUSF, secretKSEAF, secretSUPI: bitstring [private].
+free debug: bitstring [private].
+
+query attacker(secretSUPI);
+      attacker(secretKAUSF);
+      attacker(secretKSEAF).
+
+(*======================== Macro Process =========================*)
+
+let UE(ueSUPI: bitstring, puHN: pkey, sqn: bitstring, K: key)=
+
+    (*1*) (*SN ---> [EAP-Request] ---> UE*)
+
+    (*2*) (*UE ---> [SUCI] ---> SN*)
+    new prUE: skey; (*UE의 eph private key 생성*)
+    let C0 = pk(prUE) in (*C0 = UE의 eph public key*)
+    let kUE = KDF(k2b(DHkey(puHN, prUE))) in (*eph shared key = HN의 공개키 ^ UE의 eph Private Key*)
+    let EK = PF_EK(kUE) in
+    let ICB = PF_ICB(kUE) in
+    let MacK = PF_MacK(kUE) in
+    let C1 = senc_CTR(EK, ueSUPI, ICB) in
+    let C2 = HMAC(MacK, C1) in
+    event beginUE_HN_SUPI(ueSUPI, C0, puHN);
+    out(usch, (C0, C1, C2)); (*SUCI = C0||C1||C2*)
+    
+    (*9*)
+    in(usch, (RAND_UE: bitstring, CSQN_UE: bitstring, AMF_UE: bitstring, MAC_UE: bitstring, AT_MAC_UE: bitstring));
+    
+    (*10*) (*Verify AUTN and Calculate SQN / MAC / MAC_AKA_Challenge_Req*)
+    let AK_X    = f5(K, RAND_UE) in
+    let SQN_X   = XOR(CSQN_UE, AK_X) in (*SQN_HN임.*)
+
+    let MAC_X = f1(K, SQN_X, AMF_UE, RAND_UE) in
+
+    if MAC_X = MAC_UE then (*MAC 검증*)
+    (
+        let SQN_UE = calc_sqn(sqn, C0, RAND_UE) in (*SQN 증가*)
+
+        if SQN_X = SQN_UE then (*SQN 검증*)
+        (
+            event endHN_UE_MAC(ueSUPI, RAND_UE, SQN_UE, K);
+            event beginUE_HN_RES(ueSUPI, RAND_UE, SQN_UE, K);
+
+            let CK          = f3(K, RAND_UE) in
+            let IK          = f4(K, RAND_UE) in
+            let CK_prime    = k2b(KDF((CK,IK, SNname, CSQN_UE))) in
+            let IK_prime    = k2b(KDF((CK,IK, SNname, CSQN_UE))) in 
+
+            let K_aut = KDF((CK, IK, SNname, CSQN_UE)) in (*중요*)
+            let MSK = KDF((CK, IK, SNname, CSQN_UE)) in (*중요*)
+            let AT_MAC_X = HMAC(K_aut, (RAND_UE, SQN_UE, AMF, MAC_X, AK_X)) in
+
+            if AT_MAC_X = AT_MAC_UE then
+            (
+                (*11*) (*UE ---> [RES, MAC_AKA_Challenge_Req] ---> SN*)
+                let RES     = f2(K, RAND_UE) in
+                let K_AUSF_UE = LEFT256(k2b(MSK)) in
+                let K_SEAF_UE = KDF((K_AUSF_UE, SNname)) in
+                out (usch, (RES, AT_MAC_X));
+
+                (*순방향 비밀성 검증*)
+                out(usch, senc(b2k(ueSUPI), secretSUPI));
+                out(usch, senc(b2k(K_AUSF_UE), secretKAUSF));
+                out(usch, senc(K_SEAF_UE, secretKSEAF))
+            )
+        )
+        else event SYNCFailure()
+    )
+    else event MACFailure()
+.
+
+(*============================================================================================*)
+let SN(SNname: bitstring)=
+
+    new dsch: channel;
+    out(sch, (dsch));
+
+    (*1*) (*SN ---> [EAP-Request] ---> UE*)
+
+    (*2*)
+    in(usch, (C0_SN:pkey, C1_SN:bitstring, C2_SN:bitstring));
+
+    (*3*) (*SN ---> [SUCI] ---> HN*)
+    out(dsch, (C0_SN, C1_SN, C2_SN, SNname));
+
+    (*8*)
+    in(dsch, (RAND_SN:bitstring, CSQN_SN: bitstring, AMF_SN: bitstring, MAC_SN: bitstring, AT_MAC_SN: bitstring));
+
+    (*9*) (*SN ---> [EAP Request/AKA'-Challenge : RAND, AUTN, AT_MAC]*)
+    out(usch, (RAND_SN, CSQN_SN, AMF_SN, MAC_SN, AT_MAC_SN));
+    
+    (*11*)
+    in(usch, (RES_SN: bitstring, AT_MAC_UE_SN: bitstring));
+
+    (*12*) (*SN ---> [RES_SN, AT_MAC_SN] ---> HN*)
+    out(dsch, (RES_SN, AT_MAC_UE_SN));   
+
+    (*14*) 
+    in(dsch, (K_SEAF_SN: key, SUPI_SN: bitstring))
+.
+
+(*============================================================================================*)
+let HN(hnSUPI: bitstring, prHN: skey, sqn: bitstring, K: key)=
+
+    let puHN=pk(prHN) in
+    in (sch, (dsch: channel));
+
+    (*3*)
+    in (dsch, (C0_HN: pkey, C1_HN: bitstring, C2_HN: bitstring, SNname_HN: bitstring));
+
+    (*4*)(*EAP-Response/Identity UDM 전송, 같은 HN 내에서 이루어짐*)
+
+    (*5*) (*SUCI Deconcealment and Generate EAP-AKA'-AV*)
+    let kHN     = KDF(k2b(DHkey(C0_HN, prHN))) in
+    let EK_HN   = PF_EK(kHN) in
+    let ICB_HN  = PF_ICB(kHN) in
+    let MacK_HN   = PF_MacK(kHN) in
+    if HMAC(MacK_HN, C1_HN) = C2_HN then (*MAC 검증*)
+    (   
+        if sdec_CTR(EK_HN, C1_HN, ICB_HN) = hnSUPI then (*SUPI 식별*)
+        (
+            event endUE_HN_SUPI(hnSUPI, C0_HN, puHN); (*SUPI 검증 완료*)
+            
+            (*6*) (*UDM/ARPF ---> [EAP-AKA'-AV, SUPI]] ---> AUSF*)
+            new RAND: bitstring; (*중요*)
+
+            let SQN_HN  = calc_sqn(sqn, C0_HN, RAND) in (*SQN Increasement*)
+            let MAC     = f1(K, SQN_HN, AMF, RAND) in
+            let AK      = f5(K, RAND) in
+            let CSQN    = XOR(SQN_HN, AK) in (*Concealed SQN*)
+            let CK      = f3(K, RAND) in
+            let IK      = f4(K, RAND) in
+            let XRES    = f2(K, RAND) in (*중요*)
+            (*AUTN = CSQN || AMF || MAC *) (*중요*)
+
+            let CK_prime = k2b(KDF((CK,IK, SNname_HN, CSQN))) in (*중요*) 
+            let IK_prime = k2b(KDF((CK,IK, SNname_HN, CSQN))) in (*중요*)
+
+            (*out(dsch, (RAND, AUTN, XRES, CK'||IK', SUPI, MAC_AKA'_CHALLENGE_Req))*)
+            (*MAC값은 AUTN에*)
+
+            (*7*) (*PRF' 활용한 K_aut, MSK 등의 파생*)
+            let K_aut = KDF((CK, IK, SNname_HN, CSQN)) in (*중요*)
+            let MSK = KDF((CK, IK, SNname_HN, CSQN)) in (*중요*)
+            let AT_MAC = HMAC(K_aut, (RAND, SQN_HN, AMF, MAC, AK)) in
+
+            (*8*) (*AUSF ---> [EAP-Request/AKA'-Challenge : RAND, AUTN, MAC_AKA'_Challenge_req] ---> SN*)
+            event beginHN_UE_MAC(hnSUPI, RAND, SQN_HN, K);
+            out(dsch, (RAND, CSQN, AMF, MAC, AT_MAC));
+
+            (*12*)
+            in(dsch, (RES_HN: bitstring, AT_MAC_HN: bitstring));
+
+            (*13*) (*RES Verification*)
+            if XRES = RES_HN then
+            (
+                let AT_MAC_Y = HMAC(K_aut, (RAND, SQN_HN, AMF, MAC, AK)) in
+                if AT_MAC_Y = AT_MAC_HN then
+                (
+                    (*14*) (*HN ---> [EAP Success || K_SEAF || SUPI] ---> SN*)
+                    event middleUE_HN_RES(hnSUPI, RAND, SQN_HN, K);
+                    let K_AUSF = LEFT256(k2b(MSK)) in
+                    let K_SEAF = KDF((K_AUSF, SNname_HN)) in
+                    out(dsch, (K_SEAF, hnSUPI))
+                )
+                else event UEauth2HN_Fail()
+            )
+            else event RES_Fail()
+        )
+        else event SUCI_denial()
+    )
+    else event SUCI_MacFail()
+.
+
+(*=============== Main Process ===================*)
+process
+
+    new prHN: skey; let puHN = pk(prHN) in out(usch, puHN);
+    new K: key;
+    new SUPI: bitstring;
+    new SQN: bitstring;
+
+    ((!UE(SUPI, puHN, SQN, K)) | (!SN(SNname)) | (!HN(SUPI, prHN, SQN, K)) | phase 1; out(usch, (K, prHN)))
