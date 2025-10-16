@@ -1,0 +1,148 @@
+    set ignoreTypes = false.
+
+    type CA_id.
+    type pubKey.
+    type secKey.
+    type key.
+    type seq.
+
+
+    free TLS12_FH:   channel .
+    free TLS12_PSK:  channel .
+    free usch:       channel.
+    
+    fun pk2b(pubKey):       bitstring[data, typeConverter].
+    fun b2pk(bitstring):    pubKey[data, typeConverter].
+    fun pk(secKey): pubKey.
+    fun sk(pubKey): secKey [private].
+    fun PSK_key(key):        key.
+    fun SCP03t_e(key): key.
+    fun SCP03t_m(key): key.
+    fun SCP03t_u(key): key.
+    fun hmac(key, bitstring): bitstring.
+
+    (* Digital signatures *)
+    type sskey.
+    type spkey.
+
+    fun ss2k(secKey): key.
+    free skCI: secKey [private].
+
+    
+    fun sign(bitstring, secKey): bitstring.
+    fun sign_p(pubKey, secKey): bitstring.
+    fun aenc(bitstring, secKey): bitstring.
+
+    reduc forall m: bitstring, ssk: secKey; adec(aenc(m, ssk), pk(ssk)) = m.
+    reduc forall m: bitstring, ssk: secKey; checksign(sign(m, ssk), pk(ssk)) = m.
+    reduc forall p: pubKey, ssk: secKey; checksign_p(sign_p(p, ssk), pk(ssk)) = p.
+
+    fun senc(bitstring, key): bitstring.
+    reduc forall m: bitstring, n: key;
+    sdec(senc(m, n), n) = m.
+
+    (* DH key-exchange *)
+    fun DHkey(secKey, pubKey): key.
+    equation forall sk1: secKey, sk2: secKey;
+    DHkey(sk2, pk(sk1)) = DHkey(sk1, pk(sk2)).
+
+    (* Event *)
+    event beginD_U_cert(bitstring, bitstring, bitstring).   
+    event endU_D_cert(bitstring, bitstring, bitstring).     
+
+    event beginU_D_mac(key, bitstring).               
+    event endD_U_mac(key, bitstring).                 
+
+    query rc: bitstring, sign: bitstring, sign_p: bitstring; (* DP-eUICC sign 검증 *)
+    inj-event(endU_D_cert(rc, sign, sign_p))
+    ==> inj-event(beginD_U_cert(rc, sign, sign_p)).
+
+    query k: key, receipt: bitstring; (* eUICC-DP MAC 검증 *)
+    inj-event(endD_U_mac(k, receipt))
+    ==> inj-event(beginU_D_mac(k, receipt)).
+
+
+    (* 기밀성 *)
+    free shS_test:  bitstring [private]. 
+    query attacker(shS_test).
+
+
+    let eUICC(EID: bitstring, SD_AID: bitstring, SK_u: secKey, PK_d: pubKey, CA_ID: bitstring, pkCI: pubKey, CI_cert: bitstring)=  
+      in(TLS12_PSK, CI_cert_e:bitstring); (* 2 *)
+      
+      if(checksign(CI_cert_e, pkCI) = CA_ID) then
+      (
+        
+        new RC: bitstring;
+        out(TLS12_PSK, RC); (* 3 *)
+
+        in(TLS12_PSK, (signedData_e: bitstring, signedData_pe: bitstring)); (* 5 *)
+               
+        let RC_d:bitstring = checksign(signedData_e, PK_d) in
+        let ePK_d: pubKey = checksign_p(signedData_pe, PK_d) in
+ 
+        if RC = RC_d then
+        (
+          event endU_D_cert(RC_d, signedData_e, signedData_pe);
+          
+          let shS = DHkey(SK_u, ePK_d) in 
+         
+          let ke = SCP03t_e(shS) in
+          let km = SCP03t_m(shS) in
+          let ku = SCP03t_u(shS) in
+          let receipt = hmac(km, (EID, SD_AID, RC)) in
+          event beginU_D_mac(km, receipt);
+          
+          out(TLS12_PSK, receipt) (* 6 *)
+          
+        )
+      )
+    . 
+
+    let SM_SR()=  
+      in(TLS12_FH, (EID_s:bitstring, SD_AID_s:bitstring, CI_cert_s:bitstring)); (* 1 *)
+      out(TLS12_PSK, CI_cert_s); (* 2 *)
+      in(TLS12_PSK, RC_s: bitstring); (* 3 *)
+      out(TLS12_FH, RC_s); (* 4 *)
+      in(TLS12_FH, (EID_ss: bitstring, SD_AID_ss: bitstring, signedData_s:bitstring, signedData_ps:bitstring)); (* 5 *)
+      out(TLS12_PSK, (signedData_s, signedData_ps)); (* 5 *)
+      in(TLS12_PSK, receipt_s: bitstring); (* 6 *)
+      out(TLS12_FH, receipt_s) (* 7 *)
+    . 
+
+    let SM_DP(EID: bitstring, SD_AID: bitstring, SK_d: secKey, PK_u: pubKey, CA_ID: bitstring, pkCI: pubKey, CI_cert: bitstring)=  
+      
+      out(TLS12_FH, (EID, SD_AID, CI_cert)); (* 1 *)
+      in(TLS12_FH, RC_d: bitstring); (* 4 *)
+
+      new eSK_d: secKey;
+      let ePK_d = pk(eSK_d) in
+      let signedData = sign(RC_d, SK_d) in
+      let signedData_p = sign_p(ePK_d, SK_d) in
+      event beginD_U_cert(RC_d, signedData, signedData_p);
+      out(TLS12_FH, (EID, SD_AID, signedData, signedData_p)); (* 5 *)
+      in(TLS12_FH, receipt_d: bitstring);(* 7 *)
+      let shS = DHkey(eSK_d, PK_u) in
+                
+      let ke = SCP03t_e(shS) in
+      let km = SCP03t_m(shS) in
+      let ku = SCP03t_u(shS) in
+      if receipt_d = hmac(km, (EID, SD_AID, RC_d)) then
+      (
+        event endD_U_mac(km, receipt_d);
+        out(TLS12_FH, senc(shS_test, km))
+      )
+    . 
+
+   process      
+      new CA_ID: bitstring; let pkCI = pk(skCI) in
+      let CI_cert = sign(CA_ID, skCI) in  
+      
+      new SK_d: secKey; let PK_d = pk(SK_d) in
+      new SK_u: secKey; let PK_u = pk(SK_u) in
+      out(usch, (pkCI, PK_d, PK_u));
+      new EID: bitstring; new SD_AID: bitstring;
+      
+
+      (!eUICC(EID, SD_AID, SK_u, PK_d, CA_ID, pkCI, CI_cert))|(!SM_SR())|(!SM_DP(EID, SD_AID, SK_d, PK_u, CA_ID, pkCI, CI_cert)|
+      phase 1; out(usch, (SK_u)))

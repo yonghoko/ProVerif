@@ -1,0 +1,313 @@
+set ignoreTypes= false.
+
+(* Symmetric key encryption *)
+type key.
+fun senc(bitstring, key): bitstring.
+reduc forall m: bitstring, k: key; sdec(senc(m,k),k) = m.
+
+(* RSA encryption*)
+type pkey. 
+type skey.
+fun pk(skey): pkey.
+fun RSAenc(bitstring, pkey): bitstring.
+reduc forall sk: skey, m: bitstring; RSAdec(RSAenc(m, pk(sk)), sk) = m.
+
+(* AEAD *)
+(* aead_enc(key, associated_data, plain_text) *)
+fun aead_enc(key, bitstring, bitstring, bitstring): bitstring.
+(* aead_dec(key, associated_data, cipher_text) *)
+fun aead_dec(key, bitstring, bitstring, bitstring): bitstring
+reduc forall k: key, nonce: bitstring, p: bitstring, ad: bitstring; aead_dec(k, nonce, aead_enc(k, nonce, p, ad), ad) = p.
+
+(* Hash *)
+fun hash(bitstring) : bitstring.
+
+(* Diffie-Hellman *)
+type G.
+type exponent.
+type dh_params.
+
+const g: G.
+fun exp(G, exponent): G.
+equation forall x: exponent, y: exponent; exp(exp(g, x), y) = exp(exp(g, y), x).
+
+(* Digital signatures *)
+type sskey.
+type spkey.
+
+fun spk(sskey): spkey.
+fun sign(bitstring, sskey): bitstring.
+
+reduc forall m: bitstring, ssk: sskey; getmess(sign(m,ssk)) = m.
+reduc forall m: bitstring, ssk: sskey; checksign(sign(m,ssk),spk(ssk)) = m.
+
+(* Key Derivation Function *)
+type length.
+fun kdf(bitstring, length) : bitstring.
+
+(* type Converter *)
+fun g2b(G): bitstring[data, typeConverter].
+fun b2k(bitstring): key[data, typeConverter].
+fun b2pk(bitstring): pkey[data, typeConverter].
+
+(*==========TLS 1.2 message & key generation==========*)
+type negotiation_msg.
+type label.
+
+free CA_id: bitstring [private].
+
+free ch: channel.
+
+const tls12_version : label.
+const extTrue, False : label.
+const MASTER_SECRET, CLIENT_FINISHED, SERVER_FINISHED, KEY_EXPANSION : label.
+const MAC_KEY_LEN, ENC_KEY_LEN, IV_LEN : length.
+
+letfun PRF(prf_secret: bitstring, prf_label : label, prf_seed : bitstring) =
+    hash((prf_secret, prf_label, prf_seed))
+.
+
+letfun c_gen_client_hello(CH_extension: label) =
+
+    new CH_rand : bitstring;
+    new CH_ciphersuites : negotiation_msg;
+    new CH_compress_methods : negotiation_msg;
+    
+    if CH_extension = extTrue then
+    (
+        new CH_hash_alg : negotiation_msg;
+        new CH_signature_alg : negotiation_msg;
+        let client_hello_msg = (tls12_version, CH_rand, CH_ciphersuites, CH_compress_methods, CH_hash_alg, CH_signature_alg) in
+        (CH_rand, client_hello_msg)
+    )
+.   
+
+letfun s_gen_server_hello(SH_ciph: negotiation_msg, SH_cmp: negotiation_msg, SH_hash: negotiation_msg, SH_sig: negotiation_msg, SH_extension: label) =
+    
+    new SH_rand : bitstring;
+    if SH_extension = extTrue then
+    (    
+        let server_hello_msg = (tls12_version, SH_rand, SH_ciph, SH_cmp, SH_hash, SH_sig) in
+        (SH_rand, server_hello_msg)
+    )
+.
+
+letfun gen_finished(ch_rand: bitstring, sh_rand: bitstring, pre_master_secret : bitstring, handshake_messages: bitstring, finished_label: label) =
+
+    let master_secret = PRF(pre_master_secret, MASTER_SECRET, (ch_rand, sh_rand)) in
+    let verify_data = PRF(master_secret, finished_label, hash(handshake_messages)) in
+    (master_secret, verify_data)    
+.
+
+letfun check_finished(ch_rand: bitstring, sh_rand: bitstring, pre_master_secret : bitstring, handshake_messages: bitstring, finished_label: label) =
+
+    let master_secret = PRF(pre_master_secret, MASTER_SECRET, (ch_rand, sh_rand)) in
+    let finished_check_data = PRF(master_secret, finished_label, hash(handshake_messages)) in
+    (master_secret, finished_check_data)    
+.
+
+letfun key_calculation(master_secret: bitstring, s_random: bitstring, c_random: bitstring) =
+    let key_block = PRF(master_secret, KEY_EXPANSION, (s_random, c_random)) in
+    let write_MAC_key = kdf(key_block, MAC_KEY_LEN) in
+    let write_key = kdf(key_block, ENC_KEY_LEN) in
+    let write_IV = kdf(key_block, IV_LEN) in
+    (write_MAC_key, write_key, write_IV)
+.
+ 
+
+(*====================Authentication queries====================*)
+event S_STEP1_C_to_S(bitstring, bitstring).
+event E_STEP1_C_to_S(bitstring, bitstring).
+
+event S_STEP2_S_to_C(spkey, bitstring).
+event E_STEP2_S_to_C(spkey, bitstring).
+
+event S_STEP3_C_to_S(bitstring, bitstring).
+event E_STEP3_C_to_S(bitstring, bitstring).
+
+event S_STEP4_S_to_C(bitstring, bitstring).
+event E_STEP4_S_to_C(bitstring, bitstring).
+
+query rand: bitstring, client_hello: bitstring;
+       inj-event(E_STEP1_C_to_S(rand, client_hello)) 
+       ==> inj-event(S_STEP1_C_to_S(rand, client_hello)).
+
+query cert_pkS: spkey, certS: bitstring;
+       inj-event(E_STEP2_S_to_C(cert_pkS, certS)) 
+       ==> inj-event(S_STEP2_S_to_C(cert_pkS, certS)).
+
+query c_ms: bitstring, c_finished: bitstring;
+       inj-event(E_STEP3_C_to_S(c_ms, c_finished)) 
+       ==> inj-event(S_STEP3_C_to_S(c_ms, c_finished)).
+
+query s_ms: bitstring, s_finished: bitstring;
+       inj-event(E_STEP4_S_to_C(s_ms, s_finished)) 
+       ==> inj-event(S_STEP4_S_to_C(s_ms, s_finished)).
+
+event Fail_server_finished().
+event Fail_sever_cert().
+event Fail_client_finished().
+event Fail_client_cert().
+event Fail_TLS12_version().
+
+
+(*====================Secrecy assumptions====================*)
+free c_app_data, s_app_data: bitstring [private].
+
+query attacker(c_app_data).
+query attacker(s_app_data).
+
+free c_debug, s_debug: bitstring [private].
+query attacker(c_debug).
+query attacker(s_debug).
+
+
+(*====================TLS 1.2 STEP====================*)
+let proc_Client(skC: sskey, pkS: spkey, puS: pkey) =
+
+    (*[STEP 1]*)
+    (*CleintHello*)
+    let (CH_rand: bitstring, client_hello: bitstring) = c_gen_client_hello(extTrue) in
+    event S_STEP1_C_to_S(CH_rand, client_hello);
+    out (ch, client_hello);
+    
+    (*[STEP 2]*)
+    in (ch, ((tls_ver_C: label, SH_rand_C:bitstring, SH_ciph_C: negotiation_msg, SH_cmp_C: negotiation_msg, SH_hash_C: negotiation_msg, SH_sig_C: negotiation_msg),
+            certS_C: bitstring,
+            cert_request_C: bitstring,
+            server_hello_done_C: bitstring));
+
+    let server_hello_C = (tls_ver_C, SH_rand_C, SH_ciph_C, SH_cmp_C, SH_hash_C, SH_sig_C) in        
+    
+    (*Server Certificate Verify*)
+    if (checksign(certS_C, pkS) = CA_id) then
+    
+        event E_STEP2_S_to_C(pkS, certS_C);
+
+        (*[STEP 3]*)
+        (*Client Certificate*)
+        let certC = sign(CA_id,skC) in
+   
+        (*Client PreMasterSecret*)
+        new client_pre_master_secret: bitstring;
+
+        (*ClientkeyExchange*)
+        let client_key_exchange = RSAenc(client_pre_master_secret, puS) in
+
+        (*Client CertificateVerify*)
+        let c_cert_verif_msg = (client_hello, server_hello_C, certS_C, cert_request_C, server_hello_done_C, certC, client_key_exchange) in
+        let client_certificate_verify = sign(c_cert_verif_msg, skC) in
+
+        (*ChangeCipherSpec*)
+        new change_cipher_spec : bitstring; 
+
+        (*Client Finished*)
+        let c_finished_handshake_messages = (client_hello, server_hello_C, certS_C, cert_request_C, server_hello_done_C, certC, client_key_exchange, client_certificate_verify) in
+        let (client_master_secret: bitstring, client_finished: bitstring) = gen_finished(CH_rand, SH_rand_C, client_pre_master_secret, c_finished_handshake_messages, CLIENT_FINISHED) in
+
+        event S_STEP3_C_to_S(client_master_secret, client_finished);
+        out(ch, (certC, client_key_exchange, client_certificate_verify, client_finished));
+        
+        (*[STEP 4]*)
+        in(ch, server_finished_C: bitstring);
+        let s_finished_check_message = (client_hello, server_hello_C, certS_C, cert_request_C, server_hello_done_C, certC, client_key_exchange, client_certificate_verify, client_finished) in
+        let (c_master_secret: bitstring, server_finished_verify_message: bitstring) = check_finished(CH_rand, SH_rand_C, client_pre_master_secret, s_finished_check_message, SERVER_FINISHED) in       
+        (*Server finished verify*)
+        if server_finished_C = server_finished_verify_message then
+        
+            event E_STEP4_S_to_C(c_master_secret, server_finished_C);
+            
+            (*[Application Data]*)
+            new c_associated_data: bitstring;
+            let (c_mac_key: bitstring, c_write_key: bitstring, c_iv: bitstring) = key_calculation(c_master_secret, CH_rand, SH_rand_C) in
+            let e_c_app_data = aead_enc(b2k(c_write_key), c_iv, c_app_data, c_associated_data) in
+            out(ch, c_associated_data);
+            out(ch, e_c_app_data);
+            out(ch, c_debug)
+
+        else  
+            event Fail_server_finished()
+    else
+        event Fail_sever_cert()
+.
+
+let proc_Server(skS: sskey, pkC: spkey, prS: skey) =
+
+    (*[STEP 1]*)
+    in (ch, (tls_ver_S: label,  CH_rand_S : bitstring, CH_ciphersuites_S: negotiation_msg, CH_cmpress_S: negotiation_msg, CH_hash_alg_S: negotiation_msg, CH_sig_alg_S: negotiation_msg));
+    
+    if tls_ver_S = tls12_version then
+
+        let CH_S = (tls_ver_S, CH_rand_S, CH_ciphersuites_S, CH_cmpress_S, CH_hash_alg_S, CH_sig_alg_S) in
+        event E_STEP1_C_to_S(CH_rand_S,CH_S);
+
+        (*[STEP 2]*)
+        (*ServerHello*)
+        let (SH_rand: bitstring, server_hello: bitstring) = s_gen_server_hello(CH_ciphersuites_S, CH_cmpress_S, CH_hash_alg_S, CH_sig_alg_S, extTrue) in
+        
+        (*Server Certificate*)
+        let certS = sign(CA_id, skS) in
+
+        (*Certificate Request*)
+        new cert_request : bitstring;
+        
+        (*ServerHello Done*)
+        new server_hello_done : bitstring;
+
+        event S_STEP2_S_to_C(spk(skS), certS);
+        out( ch, (server_hello, certS, cert_request, server_hello_done) );
+
+        (*[STEP 3]*)
+        in(ch, (certC_S: bitstring, 
+                client_key_exchange_S: bitstring, 
+                client_certificate_verify_S: bitstring,
+                client_finished_S: bitstring));
+
+        let c_cert_check_msg = (CH_S, server_hello, certS, cert_request, server_hello_done, certC_S, client_key_exchange_S) in
+        (*Client Certificate Verify*)
+        if (checksign(certC_S, pkC) = CA_id) && (checksign(client_certificate_verify_S, pkC) = c_cert_check_msg) then
+            
+            let server_pre_master_secret = RSAdec(client_key_exchange_S, prS) in
+            let c_finished_check_message = (CH_S, server_hello, certS, cert_request, server_hello_done, certC_S, client_key_exchange_S, client_certificate_verify_S) in
+            let (s_master_secret: bitstring, client_finished_verif_data: bitstring) = check_finished(CH_rand_S, SH_rand, server_pre_master_secret, c_finished_check_message, CLIENT_FINISHED) in
+            
+            (*Client finished Verify*)
+            if client_finished_S = client_finished_verif_data then  
+               
+                event E_STEP3_C_to_S(s_master_secret, client_finished_S);
+                
+                (*[STEP 4]*)
+                let s_finished_handshake_message = (CH_S, server_hello, certS, cert_request, server_hello_done, certC_S, client_key_exchange_S, client_certificate_verify_S, client_finished_S) in
+                let (server_master_secret: bitstring, server_finished: bitstring) = gen_finished(CH_rand_S, SH_rand, server_pre_master_secret, s_finished_handshake_message, SERVER_FINISHED) in
+                event S_STEP4_S_to_C(server_master_secret, server_finished);
+                out(ch, server_finished);
+                        
+                (*[Application Data]*)
+                new s_associated_data: bitstring;
+                let (s_mac_key: bitstring, s_write_key: bitstring, s_iv: bitstring) = key_calculation(s_master_secret, SH_rand, CH_rand_S) in
+                let e_s_app_data = aead_enc(b2k(s_write_key), s_iv, s_app_data, s_associated_data) in
+                out(ch, s_associated_data);
+                out(ch, e_s_app_data);
+                out(ch, s_debug)
+                
+            else
+                event Fail_client_finished()
+        else
+            event Fail_client_cert()            
+    else
+        event Fail_TLS12_version()
+.
+
+
+process
+
+    new skC: sskey;
+    let pkC = spk(skC) in out(ch, pkC);
+
+    new skS: sskey;
+    let pkS = spk(skS) in out(ch, pkS);
+
+    new prS : skey; (*Server RSA Private Key*)
+    let puS = pk(prS) in out(ch, puS);
+
+    ( ( !proc_Client(skC, pkS, puS) ) | ( !proc_Server(skS, pkC, prS) ) | phase 1; out(ch, prS) )
