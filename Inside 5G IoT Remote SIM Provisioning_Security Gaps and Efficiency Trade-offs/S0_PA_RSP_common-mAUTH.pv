@@ -1,0 +1,310 @@
+(*
+ *               _oo0oo_
+ *              o8888888o
+ *              88" . "88
+ *              (| -_- |)
+ *              0\  =  /0
+ *            ___/`---'\___
+ *          .' \\|     |// '.
+ *         / \\|||  :  |||// \
+ *        / _||||| -:- |||||_ \    
+ *       |   | \\\  -  /// |   |
+ *       | \_|  ''\---/''  |_/ |
+ *       \  .-\__  '-'  __/-.  /
+ *     ___'. .'  /--.--\  `. .'___
+ *  ."" '<  `.___\_<|>_/___.' >' "".
+ * | | :  `- \`.;`\ _ /`;.`/ - ` : | |
+ * \  \ `_.   \_ __\ /__ _/   .-` /  /
+ * =====-.____.___ __/.-___.-'===== =---='
+
+ * ======================================
+ * IoT / Consumer RSP – Mutual Authentication only
+ * Phase 2: Common Mutual Authentication between SMDP+, IPA, eUICC
+ *  - eIM Package / AC 주입은 완료된 상태로 가정
+ * ======================================
+ *)
+
+
+(* ===== CHANNELS ===== *)
+free c         : channel.           (* Public channel: certs, meta *)
+free IPA2EUICC : channel [private]. (* Local IPA ↔ eUICC interface *)
+free IPA2SMDP  : channel [private]. (* HTTPS/TLS-abstracted channel *)
+
+
+(* ===== DATA TYPES ===== *)
+type Id_t.      (* Entity identifier (SMDP, IPA, EUICC, device) *)
+type Tid_t.     (* TransactionID *)
+type Nonce_t.   (* Challenges *)
+type K_t.       (* Keys (long-term) *)
+type Sig_t.     (* Digital signatures *)
+type Cert_t.    (* Certificates *)
+type Tag_t.     (* Roles / message tags *)
+
+
+(* ===== CONSTANTS ===== *)
+(* Entity IDs *)
+const ID_SMDP   : Id_t.
+const ID_IPA    : Id_t.
+const ID_EUICC  : Id_t.
+
+(* Role tags *)
+const tag_ci    : Tag_t.
+const tag_dp    : Tag_t.
+const tag_eu    : Tag_t.
+
+(* Message tags *)
+const t_getChal : Tag_t.  (* IPA → EUICC: GetEUICCChallenge *)
+
+(* Root CI secret key *)
+const SK_CI     : K_t [private].
+
+(* SMDP long-term authentication key [private] *)
+const SK_DPauth : K_t [private].
+
+
+(* ===== CRYPTO PRIMITIVES ===== *)
+(* Public key extraction *)
+fun pk(K_t) : K_t.
+
+(* CI-signed certificate *)
+fun signcert(Id_t, K_t, Tag_t, K_t) : Cert_t.
+reduc forall id   : Id_t,
+             Pk   : K_t,
+             role : Tag_t,
+             Sk   : K_t;
+  checkcert(signcert(id, Pk, role, Sk), pk(Sk)) = (id, Pk, role).
+
+(* RSP-style helper for certificates *)
+letfun certificate(id:Id_t, Pk:K_t, role:Tag_t) =
+  signcert(id, Pk, role, SK_CI).
+
+(* Sign / verify *)
+fun sign(bitstring, K_t) : Sig_t.
+reduc forall m  : bitstring,
+             Sk : K_t;
+  checksign(sign(m, Sk), pk(Sk)) = m.
+
+(* Structured payload constructors – treated as data so we can pattern-match *)
+fun mk_serverSigned(Tid_t, Nonce_t, Nonce_t, Id_t) : bitstring [data].
+(* tid, eChal, sChal, SMDP-ID *)
+
+fun mk_clientSigned(Tid_t, Nonce_t) : bitstring [data].
+(* tid, sChal *)
+
+
+
+(* ===== EVENTS ===== *)
+(* Server-side “begin” of auth session *)
+event S_AUTH_BEGIN(Id_t, Tid_t).
+(* (U, tid) *)
+
+(* Mutual authentication success *)
+event U_AUTH_OK(Id_t, Tid_t).  (* eUICC finished server auth *)
+event S_AUTH_OK(Id_t, Tid_t).  (* SMDP finished client auth *)
+
+
+(* ===== QUERIES ===== *)
+
+(* --- Mutual Authentication --- *)
+
+(* eUICC server-auth implies server started that session *)
+query U:Id_t, tid:Tid_t;
+  event(U_AUTH_OK(U, tid))  ==>  inj-event(S_AUTH_BEGIN(U, tid)).
+
+(* SMDP client-auth implies eUICC has server-auth OK *)
+query U2:Id_t, tid2:Tid_t;
+  event(S_AUTH_OK(U2, tid2))  ==>  inj-event(U_AUTH_OK(U2, tid2)).
+
+
+(* ===== eUICC – Mutual Auth only ===== *)
+
+let EUICC_HONEST(PK_CI:K_t, dev:Id_t) =
+  (* eUICC long-term keypair *)
+  new SK_EUICC:K_t;
+  let PK_EUICC   = pk(SK_EUICC) in
+  let Cert_EUICC = certificate(ID_EUICC, PK_EUICC, tag_eu) in
+
+  (* Publish certificate *)
+  out(c, Cert_EUICC);
+
+  (
+    (* (2) IPA -> eUICC: GetEUICCChallenge *)
+    in(IPA2EUICC, (=t_getChal, =ID_IPA, dev_in:Id_t));
+    if dev_in = dev then
+
+    (* (3) eUICC generates fresh challenge *)
+    new eChal:Nonce_t;
+
+    (* (4) Return challenge to IPA *)
+    out(IPA2EUICC, (dev, eChal));
+
+    (* (11) AuthenticateServer – IPA -> eUICC *)
+    in(IPA2EUICC,
+       (dev_srv        : Id_t,
+        serverSigned   : bitstring,
+        serverSig      : Sig_t,
+        Cert_DPauth    : Cert_t));
+    if dev_srv = dev then
+
+    (* Verify SMDP certificate *)
+    let (id_dp     : Id_t,
+         PK_DPauth : K_t,
+         role_dp   : Tag_t) =
+      checkcert(Cert_DPauth, PK_CI) in
+
+    (* Verify server signature and decode payload *)
+    let decoded_srv:bitstring =
+      checksign(serverSig, PK_DPauth) in
+
+    let mk_serverSigned(tidU      : Tid_t,
+                        eChalU    : Nonce_t,
+                        sChalU    : Nonce_t,
+                        smdpAddrU : Id_t) = decoded_srv in
+
+    if eChalU = eChal then
+    if smdpAddrU = ID_SMDP then
+
+    (* Mutual auth: server accepted (from client viewpoint) *)
+    event U_AUTH_OK(dev, tidU);
+
+    (* (13) eUICC generates clientSigned and signature *)
+    let clientSigned = mk_clientSigned(tidU, sChalU) in
+    let clientSig    = sign(clientSigned, SK_EUICC) in
+
+    (* (14) Send to IPA – 끝. 여기까지가 Mutual Authentication phase *)
+    out(IPA2EUICC,
+        (dev, clientSigned, clientSig, Cert_EUICC))
+  ).
+
+
+
+(* ===== SMDP+ – Mutual Auth only ===== *)
+
+let SMDP_HONEST(PK_CI:K_t, dev:Id_t) =
+  (* SMDP’s public identity and certificate *)
+  let PK_DPauth   = pk(SK_DPauth) in
+  let Cert_DPauth = certificate(ID_SMDP, PK_DPauth, tag_dp) in
+
+  (* Publish SMDP certificate *)
+  out(c, Cert_DPauth);
+
+  (
+    (* (6) IPA -> SMDP: dev, eChal *)
+    in(IPA2SMDP,
+       (devS   : Id_t,
+        eChalS : Nonce_t));
+    if devS = dev then
+
+    (* (8a) TransactionID *)
+    new tid   : Tid_t;
+    (* (8b) serverChallenge *)
+    new sChal : Nonce_t;
+
+    (* Server begins auth session *)
+    event S_AUTH_BEGIN(devS, tid);
+
+    (* (8d,e) Create serverSigned, serverSig *)
+    let serverSigned =
+      mk_serverSigned(tid, eChalS, sChal, ID_SMDP) in
+    let serverSig = sign(serverSigned, SK_DPauth) in
+
+    (* (9) Send to IPA *)
+    out(IPA2SMDP,
+        (devS,
+         serverSigned,
+         serverSig,
+         Cert_DPauth));
+
+    (* (15) IPA -> SMDP: dev, clientSigned, clientSig, Cert_EUICC *)
+    in(IPA2SMDP,
+       (devS2        : Id_t,
+        clientSigned : bitstring,
+        clientSig    : Sig_t,
+        Cert_EUICC   : Cert_t));
+    if devS2 = dev then
+
+    (* Verify eUICC certificate *)
+    let (id_eu    : Id_t,
+         PK_EUICC : K_t,
+         role_eu  : Tag_t) =
+      checkcert(Cert_EUICC, PK_CI) in
+
+    (* Verify signature & decode *)
+    let decoded_cli:bitstring =
+      checksign(clientSig, PK_EUICC) in
+
+    let mk_clientSigned(tid2   : Tid_t,
+                        sChal2 : Nonce_t) = decoded_cli in
+
+    (* Check same session *)
+    if tid2   = tid then
+    if sChal2 = sChal then
+
+    (* Client auth OK *)
+    event S_AUTH_OK(dev, tid)
+  ).
+
+
+
+(* ===== IPA – Honest relay (mutual-auth only) ===== *)
+let IPA_HONEST(PK_CI:K_t, dev:Id_t) =
+  (
+    (* eIM package has already selected target device dev *)
+
+    (* Request eUICC challenge *)
+    out(IPA2EUICC, (t_getChal, ID_IPA, dev));
+
+    (* eUICC returns challenge *)
+    in(IPA2EUICC, (dev_ch:Id_t, eChal:Nonce_t));
+    if dev_ch = dev then
+
+    (* Forward to SMDP *)
+    out(IPA2SMDP, (dev, eChal));
+
+    (* Receive SMDP’s serverSigned and cert *)
+    in(IPA2SMDP,
+       (dev2         : Id_t,
+        serverSigned : bitstring,
+        serverSig    : Sig_t,
+        Cert_DPauth  : Cert_t));
+    if dev2 = dev then
+
+    (* Forward to eUICC for AuthenticateServer *)
+    out(IPA2EUICC,
+        (dev, serverSigned, serverSig, Cert_DPauth));
+
+    (* Receive client response from eUICC *)
+    in(IPA2EUICC,
+       (dev3         : Id_t,
+        clientSigned : bitstring,
+        clientSig    : Sig_t,
+        Cert_EUICC   : Cert_t));
+    if dev3 = dev then
+
+    (* Forward to SMDP for AuthenticateClient *)
+    out(IPA2SMDP,
+        (dev, clientSigned, clientSig, Cert_EUICC))
+  ).
+
+
+
+(* ===== MAIN PROCESS ===== *)
+process
+  (* CI public key distribution *)
+  let PK_CI = pk(SK_CI) in
+  out(c, PK_CI);
+
+  (* Single device / single-session instance – Mutual Auth only *)
+  new devMain:Id_t;
+  ( !SMDP_HONEST(PK_CI, devMain)
+  | !IPA_HONEST(PK_CI, devMain)
+  | !EUICC_HONEST(PK_CI, devMain)
+  )
+  (* PFS: after phase 1, leak server long-term key 
+| ( phase 1;
+    out(c, (SK_CI, SK_DPauth))
+  )*)
+
+
+
+

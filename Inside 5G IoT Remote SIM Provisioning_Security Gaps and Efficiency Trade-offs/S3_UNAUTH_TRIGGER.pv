@@ -1,0 +1,267 @@
+(*
+ * IoT RSP – S3 Unauthorized Provisioning Trigger (end-to-end)
+ * Goal: Show that install (DL_OK) can happen WITHOUT any CONSENT(U,ProfID).
+ * So the query: DL_OK ==> CONSENT should become FALSE.
+
+ 1) inj-event(BIND_OK) ==> inj-event(BIND_BEGIN) is true
+
+공격자가 (악성 IPA/네트워크 장악 상태여도) eUICC가 ‘바인딩 검증에 성공했다(BIND_OK)’고 찍게 만드는 상황을 만들려면,
+
+반드시 서버(SMDP+) 쪽에서 그 바인딩을 실제로 생성한 흔적(BIND_BEGIN) 이 존재해야 한다는 뜻입니다.
+
+공격적으로 해석하면: 바인딩 응답 위조/유도 성공(=BIND_OK)을 “서버가 만든 바인딩 없이” 만들어내는 위조 공격은 막힌다는 의미예요.
+(MAC+서명 검증이 제대로 걸려있다는 시그널)
+
+2) inj-event(DL_OK) ==> inj-event(BIND_OK) is true
+
+eUICC가 프로파일 설치 완료(DL_OK) 를 찍는 실행(trace)이 있으면,
+
+그 전에 무조건 바인딩 검증 성공(BIND_OK) 이 선행되어야 한다는 뜻입니다.
+
+공격적으로 해석하면: “바인딩 스킵하고 바로 설치로 점프” 같은 흐름(절차 무시)은 ProVerif 모델에서 불가능하다는 결론입니다.
+즉, 설치는 바인딩 검증을 반드시 통과해야만 함.
+
+3) not attacker(prof_plain) is true
+
+공격자는 트래픽을 다 보고/바꾸고/재전송해도 프로파일 평문(prof_plain)을 알아내지 못한다는 뜻입니다.
+
+중요한 포인트: 이건 “공격자가 키를 얻어 복호화하는지”만 보는 게 아니라, 관측 가능한 모든 메시지 + 조작 가능한 릴레이(IPA) 환경에서 그 평문이 논리적으로 유출되는 경로가 있는지를 보는 거예요.
+
+공격 관점 의미: 기밀성(Confidentiality)은 유지됩니다.
+
+4) event(DL_OK) ==> event(CONSENT) is false
+
+이게 S3의 핵심이에요.
+
+“어떤 설치 완료(DL_OK) 실행이 있으면, 반드시 사전 동의/승인(CONSENT)이 있어야 한다”라는 요구사항을 걸었는데,
+
+ProVerif가 반례(trace)를 찾았다는 뜻입니다. 즉,
+
+CONSENT가 한 번도 발생하지 않았는데도 DL_OK는 발생하는 실행이 존재한다.
+
+공격적으로 번역하면:
+
+공격자는 키를 훔치지 못해도,
+
+‘승인/소유권/의도 확인’이 없는 주문/트리거 경로를 악용해서
+
+“정상적인 암호 검증을 거쳐” 프로파일 설치까지 흐름을 완료시킬 수 있다는 겁니다.
+
+즉, S3는 “암호가 깨진다”가 아니라,
+
+권한 없는 프로비저닝 트리거(authorization bypass),
+
+프로세스/정책 레벨의 취약점(누가 프로비저닝을 시작할 수 있는가?)을 잡아내는 쿼리예요.
+
+그래서 “공격자가 키를 못 얻는데 무슨 의미?”에 대한 답
+
+의미가 큽니다. IoT RSP에서 실제 사고는 종종 (1) 데이터 유출만이 아니라 (2) 잘못된 상태 전이로도 발생하거든요.
+
+기밀성은 지켜져도,
+
+공격자가 원치 않는 프로파일을 원치 않는 디바이스에 ‘정상 설치’ 시키면:
+
+운영자 관점: 가입/요금/재고/기기 관리가 깨지고,
+
+보안 관점: 디바이스의 네트워크 소속/정책이 바뀌고(=관리권 영향),
+
+공급망/대량 운영 관점: “승인 없는 대규모 변경”이 가능해집니다.
+ *)
+
+set ignoreTypes = false.
+
+(* ===== CHANNELS ===== *)
+free c         : channel.            (* public *)
+free IPA2EUICC : channel [private].  (* abstract local link *)
+free IPA2SMDP  : channel [private].  (* abstract TLS link *)
+
+(* ===== DATA TYPES ===== *)
+type Id_t.
+type Tid_t.
+type ProfID_t.
+
+type SkDH_t.
+type PkDH_t.
+type K_t.
+
+type Tag_t.
+
+(* signatures *)
+type SigKey_t.
+type VerKey_t.
+
+(* ===== CONSTANTS ===== *)
+const ID_SMDP : Id_t.
+const ID_IPA  : Id_t.
+
+const t_getQU     : Tag_t.
+const t_bindReq   : Tag_t.
+const t_bindResp  : Tag_t.
+const t_dlReceipt : Tag_t.
+
+(* ===== CRYPTO PRIMITIVES ===== *)
+fun pk(SkDH_t) : PkDH_t.
+
+fun DH(SkDH_t, PkDH_t) : K_t.
+equation forall su:SkDH_t, ss:SkDH_t;
+  DH(su, pk(ss)) = DH(ss, pk(su)).
+
+fun kdf_prof(K_t, Id_t, PkDH_t, PkDH_t) : K_t.
+fun k_data(K_t) : K_t.
+fun k_mac(K_t)  : K_t.
+
+fun senc(bitstring, K_t) : bitstring.
+reduc forall m:bitstring, k:K_t;
+  sdec(senc(m,k),k) = m.
+
+fun hmac(K_t, bitstring) : bitstring.
+
+fun vpk(SigKey_t) : VerKey_t.
+fun sign(bitstring, SigKey_t) : bitstring.
+reduc forall m:bitstring, sk:SigKey_t;
+  checksign(sign(m, sk), vpk(sk)) = m.
+
+free SK_Sp : SigKey_t [private].  (* SMDP signing key *)
+
+(* ===== STRUCTURED PAYLOADS ===== *)
+fun mk_bindReq(Id_t, ProfID_t, PkDH_t) : bitstring [data].
+fun mk_bindResp(Tid_t, Id_t, ProfID_t, PkDH_t, PkDH_t, bitstring) : bitstring [data].
+fun mk_dlReceipt(Tid_t, Id_t, ProfID_t) : bitstring [data].
+
+(* ===== SECRET PROFILE ===== *)
+free prof_plain : bitstring [private].
+
+(* ===== EVENTS ===== *)
+event BIND_BEGIN(Id_t, ProfID_t, Tid_t, PkDH_t, PkDH_t).
+event BIND_OK   (Id_t, ProfID_t, Tid_t, PkDH_t, PkDH_t).
+event DL_OK     (Id_t, ProfID_t, Tid_t, PkDH_t, PkDH_t).
+
+(* S3: authorization/consent (should gate provisioning in real systems) *)
+event CONSENT(Id_t, ProfID_t).
+
+(* ===== QUERIES ===== *)
+query U:Id_t, P:ProfID_t, tid:Tid_t, qu:PkDH_t, qs:PkDH_t;
+  inj-event(BIND_OK(U,P,tid,qu,qs)) ==> inj-event(BIND_BEGIN(U,P,tid,qu,qs)).
+
+query U2:Id_t, P2:ProfID_t, tid2:Tid_t, qu2:PkDH_t, qs2:PkDH_t;
+  inj-event(DL_OK(U2,P2,tid2,qu2,qs2)) ==> inj-event(BIND_OK(U2,P2,tid2,qu2,qs2)).
+
+query attacker(prof_plain).
+
+(* S3 core property: any install must have prior consent *)
+query U3:Id_t, P3:ProfID_t, tid3:Tid_t, qu3:PkDH_t, qs3:PkDH_t;
+  event(DL_OK(U3,P3,tid3,qu3,qs3)) ==> event(CONSENT(U3,P3)).
+
+(* ===== EUICC ===== *)
+let EUICC_IOT_BIND_DL(dev:Id_t) =
+  (* server verification key via public channel (cert/pk abstraction) *)
+  in(c, pk_sp:VerKey_t);
+
+  new skU:SkDH_t;
+  let Q_U = pk(skU) in
+  (
+    in(IPA2EUICC, (tag1:Tag_t, dev1:Id_t));
+    if tag1 = t_getQU then
+    if dev1 = dev then
+
+      out(IPA2EUICC, (dev, Q_U));
+
+      in(IPA2EUICC,
+         (dev_br:Id_t, tid_br:Tid_t, prof_br:ProfID_t,
+          Q_S:PkDH_t, BPP_cipher:bitstring, mac_prof:bitstring, sig_prof:bitstring));
+
+      if dev_br = dev then
+        let Z_US  = DH(skU, Q_S) in
+        let baseK = kdf_prof(Z_US, ID_SMDP, Q_S, Q_U) in
+        let k_enc = k_data(baseK) in
+        let k_tag = k_mac(baseK) in
+
+        let bind_body = mk_bindResp(tid_br, dev_br, prof_br, Q_S, Q_U, BPP_cipher) in
+
+        if mac_prof = hmac(k_tag, bind_body) then
+          let decoded = checksign(sig_prof, pk_sp) in
+          if decoded = bind_body then
+
+            event BIND_OK(dev_br, prof_br, tid_br, Q_U, Q_S);
+
+            let p = sdec(BPP_cipher, k_enc) in
+
+            let rec_payload = mk_dlReceipt(tid_br, dev_br, prof_br) in
+            let rec_mac = hmac(k_tag, rec_payload) in
+
+            event DL_OK(dev_br, prof_br, tid_br, Q_U, Q_S);
+
+            out(IPA2EUICC, (dev_br, tid_br, prof_br, rec_mac))
+  ).
+
+(* ===== SMDP ===== *)
+let SMDP_IOT_BIND_DL(dev:Id_t) =
+  (* publish verification key *)
+  out(c, vpk(SK_Sp));
+
+  in(IPA2SMDP, (tag2:Tag_t, dev_req:Id_t, profId:ProfID_t, Q_U:PkDH_t));
+  if tag2 = t_bindReq then
+  if dev_req = dev then
+
+    new skS:SkDH_t;
+    let Q_S = pk(skS) in
+
+    let Z_US  = DH(skS, Q_U) in
+    let baseK = kdf_prof(Z_US, ID_SMDP, Q_S, Q_U) in
+    let k_enc = k_data(baseK) in
+    let k_tag = k_mac(baseK) in
+
+    new tid:Tid_t;
+
+    let BPP_cipher = senc(prof_plain, k_enc) in
+    let bind_body  = mk_bindResp(tid, dev_req, profId, Q_S, Q_U, BPP_cipher) in
+    let mac_prof   = hmac(k_tag, bind_body) in
+    let sig_prof   = sign(bind_body, SK_Sp) in
+
+    event BIND_BEGIN(dev_req, profId, tid, Q_U, Q_S);
+
+    out(IPA2SMDP, (t_bindResp, dev_req, tid, profId, Q_S, BPP_cipher, mac_prof, sig_prof));
+
+    in(IPA2SMDP, (tag3:Tag_t, dev_rec:Id_t, tid_rec:Tid_t, prof_rec:ProfID_t, rec_mac:bitstring));
+    if tag3 = t_dlReceipt then
+    if dev_rec = dev_req then
+    if prof_rec = profId then
+    if tid_rec = tid then
+      let rec_payload = mk_dlReceipt(tid_rec, dev_rec, prof_rec) in
+      if rec_mac = hmac(k_tag, rec_payload) then 0.
+
+(* ===== IPA (malicious) – S3 end-to-end trigger WITHOUT CONSENT ===== *)
+let IPA_S3_ATTACK(dev:Id_t) =
+  (* get Q_U *)
+  out(IPA2EUICC, (t_getQU, dev));
+  in(IPA2EUICC, (dev1:Id_t, Q_U:PkDH_t));
+  if dev1 = dev then
+
+    (* attacker chooses profile arbitrarily *)
+    new prof_attack:ProfID_t;
+
+    (* trigger bindReq *)
+    out(IPA2SMDP, (t_bindReq, dev, prof_attack, Q_U));
+
+    (* receive bindResp from SMDP *)
+    in(IPA2SMDP,
+       (tagR:Tag_t, devR:Id_t, tidR:Tid_t, profR:ProfID_t,
+        Q_S:PkDH_t, bpp:bitstring, mac:bitstring, sig:bitstring));
+    if tagR = t_bindResp then
+    if devR = dev then
+
+      (* forward to EUICC so that BIND_OK / DL_OK can happen *)
+      out(IPA2EUICC, (devR, tidR, profR, Q_S, bpp, mac, sig));
+
+      (* get receipt from EUICC and forward to SMDP *)
+      in(IPA2EUICC, (dev2:Id_t, tid2:Tid_t, prof2:ProfID_t, rec:bitstring));
+      if dev2 = dev then
+        out(IPA2SMDP, (t_dlReceipt, dev2, tid2, prof2, rec)).
+
+(* ===== MAIN ===== *)
+process
+  new devMain:Id_t;
+  ( !SMDP_IOT_BIND_DL(devMain)
+  | !EUICC_IOT_BIND_DL(devMain)
+  |  IPA_S3_ATTACK(devMain)
+  )

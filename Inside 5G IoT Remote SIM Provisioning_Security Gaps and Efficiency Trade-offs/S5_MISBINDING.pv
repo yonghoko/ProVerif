@@ -1,0 +1,227 @@
+(*
+ * IoT RSP - S5 Misbinding demo
+ * Idea: signature/MAC body omits (dev, profId, tid).
+ * Attacker relabels profId/tid/dev in the outer message => eUICC still verifies.
+ (핵심) 정당한 컨텍스트에 대한 바인딩이 무너짐: eUICC의 BIND_OK가 서버의 대응 시작 이벤트와 동일 튜플로 연결되지 않는다.
+
+(부가) 승인/주문 정책을 강제하는 증거가 암호학적으로 묶여있지 않으면 DL_OK가 CONSENT 없이도 가능해진다.
+
+(하지만) 프로파일 평문은 여전히 비밀일 수 있다
+ *)
+
+set ignoreTypes = false.
+
+(* ===== Channels ===== *)
+free IPA2EUICC : channel [private].
+free IPA2SMDP  : channel [private].
+
+(* ===== Types ===== *)
+type Id_t.
+type Tid_t.
+type ProfID_t.
+type SkDH_t.
+type PkDH_t.
+type K_t.
+type Tag_t.
+
+type SigKey_t.
+type VerKey_t.
+
+(* ===== Constants ===== *)
+const ID_SMDP   : Id_t.
+const t_getQU   : Tag_t.
+const t_bindReq : Tag_t.
+const t_bindResp: Tag_t.
+const t_dlReceipt : Tag_t.
+
+const PROF_A : ProfID_t.
+const PROF_B : ProfID_t.
+
+(* ===== Crypto ===== *)
+fun pk(SkDH_t) : PkDH_t.
+
+fun DH(SkDH_t, PkDH_t) : K_t.
+equation forall su:SkDH_t, ss:SkDH_t;
+  DH(su, pk(ss)) = DH(ss, pk(su)).
+
+fun kdf_prof(K_t, Id_t, PkDH_t, PkDH_t) : K_t.
+fun k_data(K_t) : K_t.
+fun k_mac(K_t)  : K_t.
+
+fun senc(bitstring, K_t) : bitstring.
+reduc forall m:bitstring, k:K_t;
+  sdec(senc(m,k),k) = m.
+
+fun hmac(K_t, bitstring) : bitstring.
+
+fun spk(SigKey_t) : VerKey_t.
+fun sign(bitstring, SigKey_t) : bitstring.
+reduc forall m:bitstring, sk:SigKey_t;
+  checksign(sign(m, sk), spk(sk)) = m.
+
+free SK_Sp : SigKey_t [private].
+
+(* ===== Profile encoding (to show “semantic pid” mismatch) ===== *)
+free prof_plain : bitstring [private].
+fun mk_prof(ProfID_t, bitstring) : bitstring [data].
+reduc forall pid:ProfID_t, payload:bitstring;
+  getPid(mk_prof(pid, payload)) = pid.
+
+(* ===== Structured payloads ===== *)
+fun mk_bindReq(Id_t, Tid_t, ProfID_t, PkDH_t) : bitstring [data].
+
+(* STRONG (fixed) would include tid/dev/profId, but S5 uses WEAK body *)
+fun mk_bindBody_weak(PkDH_t, PkDH_t, bitstring) : bitstring [data].
+
+fun mk_dlReceipt(Tid_t, Id_t, ProfID_t) : bitstring [data].
+
+(* ===== Events ===== *)
+event BIND_BEGIN(Id_t, ProfID_t, Tid_t, PkDH_t, PkDH_t).
+event BIND_OK(Id_t, ProfID_t, Tid_t, PkDH_t, PkDH_t).
+event DL_OK(Id_t, ProfID_t, Tid_t, PkDH_t, PkDH_t).
+
+event CONSENT(Id_t, ProfID_t, Tid_t).  (* authorization policy marker *)
+event S5_MISBIND(Id_t, Tid_t, ProfID_t, ProfID_t). (* (dev,tid,label,actual) *)
+
+(* ===== Queries ===== *)
+(* Baseline-style correspondences *)
+query U:Id_t, P:ProfID_t, tid:Tid_t, qu:PkDH_t, qs:PkDH_t;
+  inj-event(BIND_OK(U,P,tid,qu,qs)) ==> inj-event(BIND_BEGIN(U,P,tid,qu,qs)).
+
+query U2:Id_t, P2:ProfID_t, tid2:Tid_t, qu2:PkDH_t, qs2:PkDH_t;
+  inj-event(DL_OK(U2,P2,tid2,qu2,qs2)) ==> inj-event(BIND_OK(U2,P2,tid2,qu2,qs2)).
+
+(* Authorization: install must imply consent for that (dev,prof,tid) *)
+query U3:Id_t, P3:ProfID_t, tid3:Tid_t, qu3:PkDH_t, qs3:PkDH_t;
+  event(DL_OK(U3,P3,tid3,qu3,qs3)) ==> event(CONSENT(U3,P3,tid3)).
+
+(* Secrecy: attacker should NOT learn prof_plain *)
+query attacker(prof_plain).
+
+(* Reachability: can we trigger misbinding event? *)
+query U4:Id_t, tid4:Tid_t, pl:ProfID_t, pa:ProfID_t;
+  event(S5_MISBIND(U4, tid4, pl, pa)).
+
+(* ===== eUICC ===== *)
+let EUICC(dev:Id_t) =
+  new skU:SkDH_t;
+  let Q_U = pk(skU) in
+  in(IPA2EUICC, (tag1:Tag_t, dev1:Id_t, tid0:Tid_t, pref0:ProfID_t));
+  if tag1 = t_getQU then
+    if dev1 = dev then
+      (
+        out(IPA2EUICC, (dev, tid0, pref0, Q_U));
+        in(IPA2EUICC,
+           (dev_br:Id_t, tid_br:Tid_t, prof_label:ProfID_t,
+            Q_S:PkDH_t, BPP_cipher:bitstring, mac_prof:bitstring, sig_prof:bitstring));
+
+        if dev_br = dev then
+          (
+            let Z_US  = DH(skU, Q_S) in
+            let baseK = kdf_prof(Z_US, ID_SMDP, Q_S, Q_U) in
+            let k_enc = k_data(baseK) in
+            let k_tag = k_mac(baseK) in
+
+            (* S5 weakness: verification body ignores (dev,tid,prof_label) *)
+            let bind_body = mk_bindBody_weak(Q_S, Q_U, BPP_cipher) in
+
+            if mac_prof = hmac(k_tag, bind_body) then
+              (
+                let decoded = checksign(sig_prof, spk(SK_Sp)) in
+                if decoded = bind_body then
+                  (
+                    event BIND_OK(dev_br, prof_label, tid_br, Q_U, Q_S);
+
+                    let p = sdec(BPP_cipher, k_enc) in
+                    let actual_pid = getPid(p) in
+                    if actual_pid = prof_label then 0
+                    else event S5_MISBIND(dev_br, tid_br, prof_label, actual_pid);
+
+                    event DL_OK(dev_br, prof_label, tid_br, Q_U, Q_S);
+
+                    let rec_payload = mk_dlReceipt(tid_br, dev_br, prof_label) in
+                    let rec_mac = hmac(k_tag, rec_payload) in
+                    out(IPA2EUICC, (dev_br, tid_br, prof_label, rec_mac))
+                  )
+                else 0
+              )
+            else 0
+          )
+        else 0
+      )
+    else 0
+  else 0.
+
+(* ===== SMDP+ ===== *)
+let SMDP(dev:Id_t) =
+  in(IPA2SMDP, (tag2:Tag_t, dev_req:Id_t, tid_req:Tid_t, profId:ProfID_t, Q_U:PkDH_t));
+  if tag2 = t_bindReq then
+    if dev_req = dev then
+      (
+        new skS:SkDH_t;
+        let Q_S = pk(skS) in
+
+        let Z_US  = DH(skS, Q_U) in
+        let baseK = kdf_prof(Z_US, ID_SMDP, Q_S, Q_U) in
+        let k_enc = k_data(baseK) in
+        let k_tag = k_mac(baseK) in
+
+        let BPP_cipher = senc(mk_prof(profId, prof_plain), k_enc) in
+
+        (* S5 weakness: body excludes (dev_req, tid_req, profId) *)
+        let bind_body = mk_bindBody_weak(Q_S, Q_U, BPP_cipher) in
+        let mac_prof  = hmac(k_tag, bind_body) in
+        let sig_prof  = sign(bind_body, SK_Sp) in
+
+        event BIND_BEGIN(dev_req, profId, tid_req, Q_U, Q_S);
+
+        out(IPA2SMDP, (t_bindResp, dev_req, tid_req, profId, Q_S, BPP_cipher, mac_prof, sig_prof));
+
+        (* receipt path is not essential for S5 proof; keep minimal *)
+        0
+      )
+    else 0
+  else 0.
+
+(* ===== IPA attacker for S5: relabel profId ===== *)
+let IPA_S5_RELABEL(dev:Id_t) =
+  new tidA:Tid_t;
+
+  (* Policy: only PROF_A is authorized; PROF_B is NOT *)
+  event CONSENT(dev, PROF_A, tidA);
+
+  (* ask eUICC for Q_U tied to (tidA, PROF_A) *)
+  out(IPA2EUICC, (t_getQU, dev, tidA, PROF_A));
+  in(IPA2EUICC, (d:Id_t, t:Tid_t, p:ProfID_t, Q_U:PkDH_t));
+  if d = dev then
+    if t = tidA then
+      if p = PROF_A then
+        (
+          (* request binding for PROF_A *)
+          out(IPA2SMDP, (t_bindReq, dev, tidA, PROF_A, Q_U));
+          in(IPA2SMDP,
+             (tagR:Tag_t, devR:Id_t, tidR:Tid_t, profR:ProfID_t,
+              Q_S:PkDH_t, BPP:bitstring, mac:bitstring, sig:bitstring));
+
+          if tagR = t_bindResp then
+            if devR = dev then
+              if tidR = tidA then
+                if profR = PROF_A then
+                  (
+                    (* S5 attack: change only prof_label in the outer tuple *)
+                    out(IPA2EUICC, (dev, tidA, PROF_B, Q_S, BPP, mac, sig));
+                    0
+                  )
+                else 0
+              else 0
+            else 0
+          else 0
+        )
+      else 0
+    else 0
+  else 0.
+
+(* ===== Main ===== *)
+process
+  new devMain:Id_t;
+  ( !EUICC(devMain) | !SMDP(devMain) | IPA_S5_RELABEL(devMain) )

@@ -1,0 +1,318 @@
+(*
+ * ======================================
+ * IoT RSP – Binding + Profile Download
+ * GSMA / Ahmed-style ECDH + Profile Protection
+ *  - Assumes mutual authentication already completed
+ *  - This phase: Q_U / Q_S / Z_US / k, k' + BPP + receipt
+ *  - Orchestrator: IPA (IoT Profile Assistant)
+ * ======================================
+ *)
+
+set ignoreTypes = false.
+
+(* ===== CHANNELS ===== *)
+free c           : channel.           (* Public metadata, if needed *)
+free IPA2EUICC   : channel. (* Local IPA ↔ eUICC interface  *)
+free IPA2SMDP    : channel. (* HTTPS/TLS-abstracted channel *)
+
+
+(* ===== DATA TYPES ===== *)
+type Id_t.         (* Entity / device identifier (IoT device / EID) *)
+type Tid_t.        (* Transaction / Binding ID  *)
+type ProfID_t.     (* Profile identifier        *)
+
+type Sk_t.         (* ECDH private key          *)
+type Pk_t.         (* ECDH public key           *)
+type K_t.          (* Symmetric key (k, k')     *)
+
+type Tag_t.        (* Message tags              *)
+type Profile_t.    (* Plaintext profile content *)
+
+
+(* ===== CONSTANTS ===== *)
+const ID_SMDP   : Id_t.
+const ID_IPA    : Id_t.
+const ID_EUICC  : Id_t.
+
+(* Tags *)
+const t_getQU      : Tag_t.   (* IPA → eUICC: request Q_U                *)
+const t_bindReq    : Tag_t.   (* IPA → SMDP: binding request with Q_U    *)
+const t_bindResp   : Tag_t.   (* SMDP → IPA: Q_S, BPP, MAC, Sig          *)
+const t_dlReceipt  : Tag_t.   (* eUICC/IPA → SMDP: installation receipt  *)
+
+
+(* ===== CRYPTO PRIMITIVES ===== *)
+
+(* ECDH key pair *)
+fun pk(Sk_t) : Pk_t.
+
+(* ECDH shared secret (Z_US) *)
+fun DH(Sk_t, Pk_t) : K_t.
+equation forall su:Sk_t, ss:Sk_t;
+  DH(su, pk(ss)) = DH(ss, pk(su)).
+
+(* Symmetric encryption for BPP *)
+fun senc(bitstring, K_t) : bitstring.
+reduc forall m:bitstring, k:K_t; sdec(senc(m,k),k) = m.
+
+(* MAC / HMAC *)
+fun hmac(K_t, bitstring) : bitstring.
+
+(* KDF from Z_US and context (abstract) *)
+fun kdf_prof(K_t, Id_t, Pk_t, Pk_t) : K_t.
+(* kdf_prof(Z_US, serverId, Q_S, Q_U) = base key; from there we can split *)
+
+(* Key splitting: data key & MAC key *)
+fun k_data(K_t) : K_t.
+fun k_mac(K_t)  : K_t.
+
+(* Server signing key (profile server key) *)
+type SigKey_t.
+fun spk(SigKey_t) : Pk_t.         (* reuse Pk_t for signature pubkey type *)
+free SK_Sp : SigKey_t [private].  (* SMDP / SP signing key *)
+
+
+(* Sign / verify on structured payloads *)
+fun sign(bitstring, SigKey_t) : bitstring.
+reduc forall m:bitstring, sk:SigKey_t;
+  checksign(sign(m, sk), spk(sk)) = m.
+
+
+(* ===== STRUCTURED PAYLOADS (DATA) ===== *)
+
+(* IPA → SMDP binding request: device, profile, Q_U *)
+fun mk_bindReq(Id_t, ProfID_t, Pk_t) : bitstring [data].
+(* (dev, profId, Q_U) *)
+
+(* SMDP → eUICC binding response body: tid, dev, profId, Q_S, Q_U, BPP_cipher *)
+fun mk_bindResp(Tid_t, Id_t, ProfID_t, Pk_t, Pk_t, bitstring) : bitstring [data].
+(* (tid, dev, profId, Q_S, Q_U, BPP_cipher) *)
+
+(* Download receipt payload: tid, dev, profId *)
+fun mk_dlReceipt(Tid_t, Id_t, ProfID_t) : bitstring [data].
+
+
+
+(* ===== EVENTS ===== *)
+
+(* Binding started at SMDP+ for a given device/profile/tid *)
+event BIND_BEGIN(Id_t, ProfID_t, Tid_t).
+
+(* eUICC has successfully verified server (sig + MAC) and decrypted profile *)
+event BIND_OK(Id_t, ProfID_t, Tid_t).
+
+(* Profile fully installed and receipt emitted *)
+event DL_OK(Id_t, ProfID_t, Tid_t).
+
+
+
+(* ===== SECURITY QUERIES ===== *)
+
+(* 1) If eUICC accepts binding, SMDP+ must have started it *)
+query U:Id_t, P:ProfID_t, tid:Tid_t;
+  inj-event(BIND_OK(U, P, tid))
+  ==> inj-event(BIND_BEGIN(U, P, tid)).
+
+(* 2) If eUICC completes download, it must have validated binding *)
+query U2:Id_t, P2:ProfID_t, tid2:Tid_t;
+  inj-event(DL_OK(U2, P2, tid2))
+  ==> inj-event(BIND_OK(U2, P2, tid2)).
+
+(* 3) Profile confidentiality *)
+free prof_plain : bitstring [private].
+query attacker(prof_plain).
+
+
+
+(* ===== eUICC – ECDH, Binding & Profile Download (IoT RSP) ===== *)
+
+let EUICC_IOT_BIND_DL(dev:Id_t) =
+  (* Ephemeral ECDH keypair for this binding session *)
+  new skU : Sk_t;
+  let Q_U = pk(skU) in
+
+  (
+    (* (U1) IPA requests our ephemeral public key *)
+    in(IPA2EUICC, (tag_req:Tag_t, dev_in:Id_t));
+    if tag_req = t_getQU then
+    if dev_in = dev then
+
+      (* (U2) eUICC sends Q_U to IPA *)
+      out(IPA2EUICC, (dev, Q_U));
+
+      (* (U3) Later: receive full binding response from SMDP via IPA *)
+      in(IPA2EUICC,
+         (dev_br      : Id_t,
+          tid_br      : Tid_t,
+          profId_br   : ProfID_t,
+          Q_S         : Pk_t,
+          BPP_cipher  : bitstring,
+          mac_prof    : bitstring,
+          sig_prof    : bitstring));
+
+      if dev_br = dev then
+
+        (* Recompute shared secret and keys: Z_US → base → k_data, k_mac *)
+        let Z_US = DH(skU, Q_S) in
+        let baseK = kdf_prof(Z_US, ID_SMDP, Q_S, Q_U) in
+        let k_enc = k_data(baseK) in
+        let k_tag = k_mac(baseK)  in
+
+        (* Reconstruct binding response body for verification *)
+        let bind_body = mk_bindResp(tid_br, dev_br, profId_br, Q_S, Q_U, BPP_cipher) in
+
+        (* Verify MAC and server signature *)
+        if mac_prof = hmac(k_tag, bind_body) then
+
+          let decoded:bitstring = checksign(sig_prof, spk(SK_Sp)) in
+          if decoded = bind_body then
+
+            (* Binding accepted (server authenticated + integrity ok) *)
+            event BIND_OK(dev_br, profId_br, tid_br);
+
+            (* Decrypt profile with k_enc *)
+            let p = sdec(BPP_cipher, k_enc) in
+            (* Abstractly, p contains prof_plain; we just protect prof_plain separately *)
+
+            (* eUICC installs profile and creates receipt *)
+            let rec_payload = mk_dlReceipt(tid_br, dev_br, profId_br) in
+            let rec_mac     = hmac(k_tag, rec_payload) in
+
+            event DL_OK(dev_br, profId_br, tid_br);
+
+            (* (U4) Send receipt back to SMDP via IPA *)
+            out(IPA2EUICC,
+                (dev_br, tid_br, profId_br, rec_mac))
+  ).
+
+
+
+(* ===== SMDP+ – ECDH, Binding & Profile Delivery (IoT RSP) ===== *)
+
+let SMDP_IOT_BIND_DL(dev:Id_t) =
+  (
+    (* (S1) Receive binding request with Q_U from IPA *)
+    in(IPA2SMDP,
+       (tag_req   : Tag_t,
+        dev_req   : Id_t,
+        profId    : ProfID_t,
+        Q_U       : Pk_t));
+
+    if tag_req = t_bindReq then
+    if dev_req = dev then
+
+      (* Generate ephemeral ECDH keypair for this binding *)
+      new skS : Sk_t;
+      let Q_S = pk(skS) in
+
+      (* Compute shared secret Z_US and session keys *)
+      let Z_US = DH(skS, Q_U) in
+      let baseK = kdf_prof(Z_US, ID_SMDP, Q_S, Q_U) in
+      let k_enc = k_data(baseK) in
+      let k_tag = k_mac(baseK)  in
+
+      (* New binding transaction ID *)
+      new tid : Tid_t;
+
+      (* Build BPP as encrypted profile *)
+      let BPP_cipher = senc(prof_plain, k_enc) in
+
+      (* Binding response body and its MAC *)
+      let bind_body = mk_bindResp(tid, dev_req, profId, Q_S, Q_U, BPP_cipher) in
+      let mac_prof  = hmac(k_tag, bind_body) in
+
+      (* Server signature over the same body *)
+      let sig_prof  = sign(bind_body, SK_Sp) in
+
+      (* Mark binding as started at SMDP+ *)
+      event BIND_BEGIN(dev_req, profId, tid);
+
+      (* (S2) Send binding response to IPA *)
+      out(IPA2SMDP,
+          (t_bindResp,
+           dev_req,
+           tid,
+           profId,
+           Q_S,
+           BPP_cipher,
+           mac_prof,
+           sig_prof));
+
+      (* (S3) Later: receive installation receipt from eUICC via IPA *)
+      in(IPA2SMDP,
+         (tag_rec    : Tag_t,
+          dev_rec    : Id_t,
+          tid_rec    : Tid_t,
+          profId_rec : ProfID_t,
+          rec_mac    : bitstring));
+
+      if tag_rec = t_dlReceipt then
+      if dev_rec = dev_req then
+      if profId_rec = profId then
+
+        let rec_payload = mk_dlReceipt(tid_rec, dev_rec, profId_rec) in
+        if rec_mac = hmac(k_tag, rec_payload) then
+          (* SMDP+ accepts receipt; DL_OK is raised at eUICC side *)
+          0
+  ).
+
+
+
+(* ===== IPA – Relay for ECDH-based Binding & Download (IoT RSP) ===== *)
+
+let IPA_IOT_BIND_DL(dev:Id_t) =
+  (
+    (* (I1) Request Q_U from eUICC *)
+    out(IPA2EUICC, (t_getQU, dev));
+
+    (* (I2) Receive Q_U *)
+    in(IPA2EUICC, (dev_qu:Id_t, Q_U:Pk_t));
+    if dev_qu = dev then
+
+      (* (I3) Initiate binding with SMDP+ *)
+      new profId : ProfID_t;
+      out(IPA2SMDP, (t_bindReq, dev, profId, Q_U));
+
+      (* (I4) Receive binding response from SMDP+ *)
+      in(IPA2SMDP,
+         (tag_resp   : Tag_t,
+          dev_resp   : Id_t,
+          tid_resp   : Tid_t,
+          profId_resp: ProfID_t,
+          Q_S        : Pk_t,
+          BPP_cipher : bitstring,
+          mac_prof   : bitstring,
+          sig_prof   : bitstring));
+
+      if tag_resp = t_bindResp then
+      if dev_resp = dev then
+
+        (* (I5) Forward to eUICC *)
+        out(IPA2EUICC,
+            (dev_resp, tid_resp, profId_resp, Q_S, BPP_cipher, mac_prof, sig_prof));
+
+        (* (I6) Receive installation receipt from eUICC *)
+        in(IPA2EUICC,
+           (dev_r2     : Id_t,
+            tid_r2     : Tid_t,
+            profId_r2  : ProfID_t,
+            rec_mac    : bitstring));
+
+        if dev_r2 = dev then
+
+          (* (I7) Forward receipt to SMDP+ *)
+          out(IPA2SMDP,
+              (t_dlReceipt, dev_r2, tid_r2, profId_r2, rec_mac))
+  ).
+
+
+
+(* ===== MAIN PROCESS – IoT RSP Binding + Profile Download Phase ===== *)
+
+process
+  new devMain : Id_t;
+
+  ( !SMDP_IOT_BIND_DL(devMain)
+  | !IPA_IOT_BIND_DL(devMain)
+  | !EUICC_IOT_BIND_DL(devMain)
+  )

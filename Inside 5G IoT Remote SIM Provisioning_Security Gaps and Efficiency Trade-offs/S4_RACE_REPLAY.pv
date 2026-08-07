@@ -1,0 +1,275 @@
+(*
+ * ============================================================
+ * IoT RSP - S4: Concurrent-order race / wrong-profile install
+ * - Baseline crypto holds (MAC+Sig+ECDH-derived keys)
+ * - But authorization ("CONSENT") is NOT bound to the session
+ * - Malicious IPA triggers two orders (A,B) and forwards only B
+ IPA가 PROF_B에 대한 바인딩 응답을 “정상 암호검증 가능한 형태로” EUICC에 전달하므로,
+
+EUICC는 키를 훔친 공격이 아니라도 그냥 PROF_B를 정상 설치(DL_OK) 해 버릴 수 있고,
+
+그런데 시스템은 CONSENT를 PROF_A에 대해서만 발생시키므로,
+
+“설치된 프로파일이 승인된 프로파일이어야 한다”는 성질이 깨진다.
+ * ============================================================
+ *)
+
+set ignoreTypes = false.
+
+(* ===== CHANNELS ===== *)
+free IPA2EUICC : channel.
+free IPA2SMDP  : channel.
+
+(* ===== TYPES ===== *)
+type Id_t.
+type Tid_t.
+type ProfID_t.
+
+type SkDH_t.
+type PkDH_t.
+type K_t.
+
+type Tag_t.
+
+type SigKey_t.
+type VerKey_t.
+
+(* ===== CONSTANTS ===== *)
+const ID_SMDP  : Id_t.
+const ID_IPA   : Id_t.
+
+const PROF_A   : ProfID_t.
+const PROF_B   : ProfID_t.
+
+const t_getQU     : Tag_t.
+const t_bindReq   : Tag_t.
+const t_bindResp  : Tag_t.
+const t_dlReceipt : Tag_t.
+
+(* ===== CRYPTO ===== *)
+fun pk(SkDH_t) : PkDH_t.
+
+
+
+fun DH(SkDH_t, PkDH_t) : K_t.
+equation forall su:SkDH_t, ss:SkDH_t;
+  DH(su, pk(ss)) = DH(ss, pk(su)).
+
+fun kdf_prof(K_t, Id_t, PkDH_t, PkDH_t) : K_t.
+fun k_data(K_t) : K_t.
+fun k_mac(K_t)  : K_t.
+
+fun senc(bitstring, K_t) : bitstring.
+reduc forall m:bitstring, k:K_t;
+  sdec(senc(m,k),k) = m.
+
+fun hmac(K_t, bitstring) : bitstring.
+
+(* Signature: attacker should not be able to forge "sign" *)
+fun sign(bitstring, SigKey_t) : bitstring [private].
+
+free SK_Sp : SigKey_t [private].
+
+fun pk2(SigKey_t) : VerKey_t.
+reduc forall m:bitstring, sk:SigKey_t;
+  checksign(sign(m, sk), pk2(sk)) = m.
+
+(* ===== STRUCTURED DATA ===== *)
+fun mk_bindResp(Tid_t, Id_t, ProfID_t, PkDH_t, PkDH_t, bitstring) : bitstring [data].
+fun mk_dlReceipt(Tid_t, Id_t, ProfID_t) : bitstring [data].
+
+(* ===== SECRETS ===== *)
+free profA_plain : bitstring [private].
+free profB_plain : bitstring [private].
+
+(* ===== EVENTS ===== *)
+event BIND_BEGIN(Id_t, ProfID_t, Tid_t, PkDH_t, PkDH_t).
+event BIND_OK   (Id_t, ProfID_t, Tid_t, PkDH_t, PkDH_t).
+event DL_OK     (Id_t, ProfID_t, Tid_t, PkDH_t, PkDH_t).
+event DL_S_ACCEPT(Id_t, ProfID_t, Tid_t, PkDH_t, PkDH_t).
+
+(* "authorization / intent" abstraction *)
+event CONSENT(Id_t, ProfID_t).
+
+(* ===== QUERIES ===== *)
+
+(* Baseline correspondences *)
+query U:Id_t, P:ProfID_t, tid:Tid_t, qu:PkDH_t, qs:PkDH_t;
+  inj-event(BIND_OK(U,P,tid,qu,qs)) ==> inj-event(BIND_BEGIN(U,P,tid,qu,qs)).
+
+query U2:Id_t, P2:ProfID_t, tid2:Tid_t, qu2:PkDH_t, qs2:PkDH_t;
+  inj-event(DL_OK(U2,P2,tid2,qu2,qs2)) ==> inj-event(BIND_OK(U2,P2,tid2,qu2,qs2)).
+
+(* Confidentiality: attacker should NOT get plaintext profiles *)
+query attacker(profA_plain).
+query attacker(profB_plain).
+
+(* Authorization property (this is what S4 tries to break) *)
+query U3:Id_t, P3:ProfID_t, tid3:Tid_t, qu3:PkDH_t, qs3:PkDH_t;
+  event(DL_OK(U3,P3,tid3,qu3,qs3)) ==> event(CONSENT(U3,P3)).
+
+(* ===== PROCESSES ===== *)
+
+(* EUICC: produces one Q_U, accepts ONE binding response, installs that profile *)
+let EUICC_ONE(dev:Id_t) =
+  new skU:SkDH_t;
+  let Q_U = pk(skU) in
+
+  in(IPA2EUICC, (tag1:Tag_t, dev1:Id_t));
+  if tag1 = t_getQU then
+  if dev1 = dev then
+    (
+      out(IPA2EUICC, (dev, Q_U));
+
+      in(IPA2EUICC,
+        (tag2:Tag_t,
+         dev_br:Id_t, tid_br:Tid_t, prof_br:ProfID_t,
+         Q_S:PkDH_t, BPP_cipher:bitstring, mac_prof:bitstring, sig_prof:bitstring));
+
+      if tag2 = t_bindResp then
+      if dev_br = dev then
+        (
+          let Z_US  = DH(skU, Q_S) in
+          let baseK = kdf_prof(Z_US, ID_SMDP, Q_S, Q_U) in
+          let k_enc = k_data(baseK) in
+          let k_tag = k_mac(baseK) in
+
+          let body = mk_bindResp(tid_br, dev_br, prof_br, Q_S, Q_U, BPP_cipher) in
+          if mac_prof = hmac(k_tag, body) then
+            (
+              let PK_Sp = pk2(SK_Sp) in
+              let decoded = checksign(sig_prof, PK_Sp) in
+              if decoded = body then
+                (
+                  event BIND_OK(dev_br, prof_br, tid_br, Q_U, Q_S);
+
+                  let p = sdec(BPP_cipher, k_enc) in
+
+                  let rec_payload = mk_dlReceipt(tid_br, dev_br, prof_br) in
+                  let rec_mac = hmac(k_tag, rec_payload) in
+
+                  event DL_OK(dev_br, prof_br, tid_br, Q_U, Q_S);
+
+                  out(IPA2EUICC, (t_dlReceipt, dev_br, tid_br, prof_br, rec_mac));
+                  0
+                )
+              else 0
+            )
+          else 0
+        )
+      else 0
+    )
+  else 0
+  else 0
+.
+
+(* SMDP: session per bindReq, uses chSess for response+receipt to avoid cross-consume nondet *)
+let SMDP_SESSION() =
+  in(IPA2SMDP, (tag:Tag_t, dev:Id_t, profId:ProfID_t, Q_U:PkDH_t, chSess:channel));
+  if tag = t_bindReq then
+    (
+      new skS:SkDH_t;
+      let Q_S = pk(skS) in
+
+      let Z_US  = DH(skS, Q_U) in
+      let baseK = kdf_prof(Z_US, ID_SMDP, Q_S, Q_U) in
+      let k_enc = k_data(baseK) in
+      let k_tag = k_mac(baseK) in
+
+      new tid:Tid_t;
+
+      if profId = PROF_A then
+        (
+          let BPP = senc(profA_plain, k_enc) in
+          let body = mk_bindResp(tid, dev, profId, Q_S, Q_U, BPP) in
+          let mac  = hmac(k_tag, body) in
+          let sig  = sign(body, SK_Sp) in
+
+          event BIND_BEGIN(dev, profId, tid, Q_U, Q_S);
+
+          out(chSess, (t_bindResp, dev, tid, profId, Q_S, BPP, mac, sig));
+
+          in(chSess, (tagR:Tag_t, devR:Id_t, tidR:Tid_t, profR:ProfID_t, rec_mac:bitstring));
+          if tagR = t_dlReceipt then
+          if devR = dev then
+          if tidR = tid then
+          if profR = profId then
+            (
+              let rec_payload = mk_dlReceipt(tidR, devR, profR) in
+              if rec_mac = hmac(k_tag, rec_payload) then
+                event DL_S_ACCEPT(devR, profR, tidR, Q_U, Q_S)
+              else 0
+            )
+          else 0
+        )
+      else
+        (
+          let BPP = senc(profB_plain, k_enc) in
+          let body = mk_bindResp(tid, dev, profId, Q_S, Q_U, BPP) in
+          let mac  = hmac(k_tag, body) in
+          let sig  = sign(body, SK_Sp) in
+
+          event BIND_BEGIN(dev, profId, tid, Q_U, Q_S);
+
+          out(chSess, (t_bindResp, dev, tid, profId, Q_S, BPP, mac, sig));
+
+          in(chSess, (tagR:Tag_t, devR:Id_t, tidR:Tid_t, profR:ProfID_t, rec_mac:bitstring));
+          if tagR = t_dlReceipt then
+          if devR = dev then
+          if tidR = tid then
+          if profR = profId then
+            (
+              let rec_payload = mk_dlReceipt(tidR, devR, profR) in
+              if rec_mac = hmac(k_tag, rec_payload) then
+                event DL_S_ACCEPT(devR, profR, tidR, Q_U, Q_S)
+              else 0
+            )
+          else 0
+        )
+    )
+  else 0
+.
+
+(* Fleet manager: only approves A (intended profile) *)
+let FLEET_MANAGER(dev:Id_t) =
+  event CONSENT(dev, PROF_A);
+  0
+.
+
+(* Malicious IPA: creates two orders (A and B), but forwards ONLY B to EUICC *)
+let IPA_S4_RACE(dev:Id_t) =
+  out(IPA2EUICC, (t_getQU, dev));
+  in(IPA2EUICC, (dev_qu:Id_t, Q_U:PkDH_t));
+  if dev_qu = dev then
+    (
+      new chA:channel;
+      new chB:channel;
+
+      out(IPA2SMDP, (t_bindReq, dev, PROF_A, Q_U, chA));
+      out(IPA2SMDP, (t_bindReq, dev, PROF_B, Q_U, chB));
+
+      in(chA, (tagA:Tag_t, dvA:Id_t, tidA:Tid_t, pidA:ProfID_t, QS_A:PkDH_t, BPP_A:bitstring, macA:bitstring, sigA:bitstring));
+      in(chB, (tagB:Tag_t, dvB:Id_t, tidB:Tid_t, pidB:ProfID_t, QS_B:PkDH_t, BPP_B:bitstring, macB:bitstring, sigB:bitstring));
+
+      if tagB = t_bindResp then
+        (
+          out(IPA2EUICC, (t_bindResp, dvB, tidB, pidB, QS_B, BPP_B, macB, sigB));
+
+          in(IPA2EUICC, (tagR:Tag_t, devR:Id_t, tidR:Tid_t, pidR:ProfID_t, rec_mac:bitstring));
+          if tagR = t_dlReceipt then
+            out(chB, (t_dlReceipt, devR, tidR, pidR, rec_mac))
+          else 0
+        )
+      else 0
+    )
+  else 0
+.
+
+(* ===== MAIN ===== *)
+process
+  new devMain:Id_t;
+  ( !SMDP_SESSION()
+  | EUICC_ONE(devMain)
+  | IPA_S4_RACE(devMain)
+  | FLEET_MANAGER(devMain)
+  )

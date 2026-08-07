@@ -1,0 +1,255 @@
+(*
+ * ============================================================
+1. inj-event(BIND_OK) ==> inj-event(BIND_BEGIN) : false (깨짐)
+이유: SMDP는 (devA, profA, tidA, Q_UA, QS_A)로 BIND_BEGIN 이벤트를 찍습니다.
+그런데 IPA가 평문 profId만 바꿔치기해서 devA에게 (devA, tidA, profB, QS_A, ...)로 전달하면,
+eUICC는 MAC/SIG 검증을 bind_body에 profId가 없어서 통과하고,
+BIND_OK(devA, profB, tidA, Q_UA, QS_A)를 찍음.
+이때 profB에 대해 SMDP가 BIND_BEGIN(devA, profB, tidA, ...)를 찍은 적이 없으니, 대응 begin이 없어서 injective correspondence가 깨집니다.
+
+2. inj-event(DL_OK) ==> inj-event(BIND_OK) : true
+
+DL_OK는 EUICC 코드에서 BIND_OK 다음에만 발생하도록 짜여 있어서, 이 쿼리는 보통 유지됩니다.
+
+3. inj-event(DL_S_ACCEPT) ==> inj-event(DL_OK) : true
+
+서버가 receipt MAC 검증을 통과해야 DL_S_ACCEPT를 찍는데, receipt MAC은 세션 키(k_tag)를 알아야 만들 수 있으므로(상징 모델에서) 해당 세션에서 DL_OK를 찍은 eUICC가 존재하게 되는 쪽으로 귀결되는 경우가 많습니다.
+
+4. query not attacker(prof_plain) : true
+
+IPA가 메시지를 바꿔치기하더라도 (키가 없으면) BPP를 복호화할 수 없게 모델링되어 있어서, 프로파일 평문 자체는 유출되지 않는 게 보통입니다.
+ * ============================================================
+ *)
+
+set ignoreTypes = false.
+
+(* ===== CHANNELS ===== *)
+free IPA2EUICC : channel [private].
+free IPA2SMDP  : channel [private].
+
+(* ===== DATA TYPES ===== *)
+type Id_t.
+type Tid_t.
+type ProfID_t.
+type Tag_t.
+
+type SkDH_t.
+type PkDH_t.
+type K_t.
+
+(* signature *)
+type SigKey_t.
+type VerKey_t.
+
+(* ===== CONSTANTS ===== *)
+const ID_SMDP     : Id_t.
+
+const t_getQU     : Tag_t.
+const t_bindReq   : Tag_t.
+const t_bindResp  : Tag_t.
+const t_dlReceipt : Tag_t.
+
+(* ===== CRYPTO PRIMITIVES ===== *)
+fun pk(SkDH_t) : PkDH_t.
+
+fun DH(SkDH_t, PkDH_t) : K_t.
+equation forall su:SkDH_t, ss:SkDH_t;
+  DH(su, pk(ss)) = DH(ss, pk(su)).
+
+fun kdf_prof(K_t, Id_t, PkDH_t, PkDH_t) : K_t.
+fun k_data(K_t) : K_t.
+fun k_mac(K_t)  : K_t.
+
+fun senc(bitstring, K_t) : bitstring.
+reduc forall m:bitstring, k:K_t;
+  sdec(senc(m,k),k) = m.
+
+fun hmac(K_t, bitstring) : bitstring.
+
+fun spk(SigKey_t) : VerKey_t.
+fun sign(bitstring, SigKey_t) : bitstring.
+reduc forall m:bitstring, sk:SigKey_t;
+  checksign(sign(m, sk), spk(sk)) = m.
+
+free SK_Sp : SigKey_t [private].
+
+(* ===== SECRET PROFILE ===== *)
+free prof_plain : bitstring [private].
+
+(* ===== STRUCTURED PAYLOADS ===== *)
+
+(* request includes profId (so IPA can tamper with it as a plaintext field) *)
+fun mk_bindReq(Id_t, ProfID_t, PkDH_t) : bitstring [data].
+
+(* VULNERABLE: bind_body omits profId (!!!) *)
+fun mk_bindRespWeak(Tid_t, Id_t, PkDH_t, PkDH_t, bitstring) : bitstring [data].
+(*           (tid, dev, Q_S, Q_U, BPP_cipher)                 *)
+
+(* VULNERABLE: receipt omits profId (!!!) *)
+fun mk_dlReceiptWeak(Tid_t, Id_t) : bitstring [data].
+(*           (tid, dev)            *)
+
+(* ===== EVENTS ===== *)
+event BIND_BEGIN(Id_t, ProfID_t, Tid_t, PkDH_t, PkDH_t).
+event BIND_OK   (Id_t, ProfID_t, Tid_t, PkDH_t, PkDH_t).
+event DL_OK     (Id_t, ProfID_t, Tid_t, PkDH_t, PkDH_t).
+event DL_S_ACCEPT(Id_t, ProfID_t, Tid_t, PkDH_t, PkDH_t).
+
+(* ===== QUERIES ===== *)
+
+(* baseline anti-misbinding style *)
+query U:Id_t, P:ProfID_t, tid:Tid_t, qu:PkDH_t, qs:PkDH_t;
+  inj-event(BIND_OK(U,P,tid,qu,qs))
+  ==> inj-event(BIND_BEGIN(U,P,tid,qu,qs)).
+
+query U2:Id_t, P2:ProfID_t, tid2:Tid_t, qu2:PkDH_t, qs2:PkDH_t;
+  inj-event(DL_OK(U2,P2,tid2,qu2,qs2))
+  ==> inj-event(BIND_OK(U2,P2,tid2,qu2,qs2)).
+
+query U3:Id_t, P3:ProfID_t, tid3:Tid_t, qu3:PkDH_t, qs3:PkDH_t;
+  inj-event(DL_S_ACCEPT(U3,P3,tid3,qu3,qs3))
+  ==> inj-event(DL_OK(U3,P3,tid3,qu3,qs3)).
+
+query attacker(prof_plain).
+
+(* ============================================================
+ * EUICC (one device instance)
+ * ============================================================
+ *)
+let EUICC_IOT_BIND_DL(dev:Id_t) =
+  new skU:SkDH_t;
+  let Q_U = pk(skU) in
+  (
+    (* give Q_U *)
+    in(IPA2EUICC, (tag1:Tag_t, dev1:Id_t));
+    if tag1 = t_getQU then
+    if dev1 = dev then
+      out(IPA2EUICC, (dev, Q_U));
+
+    (* receive bind response (NOTE: profId is a plaintext field from IPA) *)
+    in(IPA2EUICC,
+      (dev_br:Id_t, tid_br:Tid_t, prof_br:ProfID_t,
+       Q_S:PkDH_t, BPP:bitstring, mac_prof:bitstring, sig_prof:bitstring));
+
+    if dev_br = dev then
+      let Z     = DH(skU, Q_S) in
+      let baseK = kdf_prof(Z, ID_SMDP, Q_S, Q_U) in
+      let k_enc = k_data(baseK) in
+      let k_tag = k_mac(baseK)  in
+
+      (* VULNERABLE: prof_br NOT included in bind_body *)
+      let bind_body = mk_bindRespWeak(tid_br, dev_br, Q_S, Q_U, BPP) in
+
+      if mac_prof = hmac(k_tag, bind_body) then
+        let decoded = checksign(sig_prof, spk(SK_Sp)) in
+        if decoded = bind_body then
+          event BIND_OK(dev_br, prof_br, tid_br, Q_U, Q_S);
+
+          let p = sdec(BPP, k_enc) in
+
+          (* VULNERABLE: receipt NOT bound to profId *)
+          let rec_payload = mk_dlReceiptWeak(tid_br, dev_br) in
+          let rec_mac     = hmac(k_tag, rec_payload) in
+
+          event DL_OK(dev_br, prof_br, tid_br, Q_U, Q_S);
+
+          out(IPA2EUICC, (dev_br, tid_br, prof_br, rec_mac))
+  ).
+
+(* ============================================================
+ * SMDP (handles one binding session per request)
+ * ============================================================
+ *)
+let SMDP_IOT_BIND_DL =
+  (
+    in(IPA2SMDP, (tag2:Tag_t, dev_req:Id_t, profId:ProfID_t, Q_U:PkDH_t));
+    if tag2 = t_bindReq then
+
+      new skS:SkDH_t;
+      let Q_S  = pk(skS) in
+
+      let Z     = DH(skS, Q_U) in
+      let baseK = kdf_prof(Z, ID_SMDP, Q_S, Q_U) in
+      let k_enc = k_data(baseK) in
+      let k_tag = k_mac(baseK)  in
+
+      new tid:Tid_t;
+
+      let BPP = senc(prof_plain, k_enc) in
+
+      (* VULNERABLE: profId NOT included in bind_body *)
+      let bind_body = mk_bindRespWeak(tid, dev_req, Q_S, Q_U, BPP) in
+      let mac_prof  = hmac(k_tag, bind_body) in
+      let sig_prof  = sign(bind_body, SK_Sp) in
+
+      event BIND_BEGIN(dev_req, profId, tid, Q_U, Q_S);
+
+      out(IPA2SMDP, (t_bindResp, dev_req, tid, profId, Q_S, BPP, mac_prof, sig_prof));
+
+      (* receipt *)
+      in(IPA2SMDP, (tag3:Tag_t, dev_rec:Id_t, tid_rec:Tid_t, prof_rec:ProfID_t, rec_mac:bitstring));
+      if tag3 = t_dlReceipt then
+      if dev_rec = dev_req then
+      if tid_rec = tid then
+
+        (* VULNERABLE: server verifies receipt without profId *)
+        let rec_payload = mk_dlReceiptWeak(tid_rec, dev_rec) in
+        if rec_mac = hmac(k_tag, rec_payload) then
+          event DL_S_ACCEPT(dev_rec, prof_rec, tid_rec, Q_U, Q_S);
+          0
+  ).
+
+(* ============================================================
+ * IPA – malicious S2 splicer (two devices, two transactions)
+ *  - gets Q_U from devA and devB
+ *  - requests bind for (devA, profA, Q_UA) and (devB, profB, Q_UB)
+ *  - receives two bindResp
+ *  - DELIVERS each response to the correct device BUT swaps plaintext profId fields
+ * ============================================================
+ *)
+let IPA_S2_SPLICER(devA:Id_t, devB:Id_t) =
+  (
+    out(IPA2EUICC, (t_getQU, devA));
+    out(IPA2EUICC, (t_getQU, devB));
+
+    in(IPA2EUICC, (d1:Id_t, Q_UA:PkDH_t));
+    in(IPA2EUICC, (d2:Id_t, Q_UB:PkDH_t));
+    if d1 = devA then
+    if d2 = devB then
+
+      new profA:ProfID_t;
+      new profB:ProfID_t;
+
+      out(IPA2SMDP, (t_bindReq, devA, profA, Q_UA));
+      out(IPA2SMDP, (t_bindReq, devB, profB, Q_UB));
+
+      in(IPA2SMDP, (tagR1:Tag_t, dR1:Id_t, tidA:Tid_t, pR1:ProfID_t, QS_A:PkDH_t, BPP_A:bitstring, macA:bitstring, sigA:bitstring));
+      in(IPA2SMDP, (tagR2:Tag_t, dR2:Id_t, tidB:Tid_t, pR2:ProfID_t, QS_B:PkDH_t, BPP_B:bitstring, macB:bitstring, sigB:bitstring));
+
+      if tagR1 = t_bindResp then
+      if tagR2 = t_bindResp then
+      if dR1 = devA then
+      if dR2 = devB then
+
+        (* S2 splice: swap only the PLAINTEXT profId field *)
+        out(IPA2EUICC, (devA, tidA, profB, QS_A, BPP_A, macA, sigA));
+        out(IPA2EUICC, (devB, tidB, profA, QS_B, BPP_B, macB, sigB));
+
+        (* collect receipts *)
+        in(IPA2EUICC, (da:Id_t, ta:Tid_t, pa:ProfID_t, rma:bitstring));
+        in(IPA2EUICC, (db:Id_t, tb:Tid_t, pb:ProfID_t, rmb:bitstring));
+
+        (* forward to server (server accepts even with swapped profId because receipt ignores it) *)
+        out(IPA2SMDP, (t_dlReceipt, da, ta, pa, rma));
+        out(IPA2SMDP, (t_dlReceipt, db, tb, pb, rmb))
+  ).
+
+(* ===== MAIN ===== *)
+process
+  new devA:Id_t;
+  new devB:Id_t;
+  ( !SMDP_IOT_BIND_DL
+  |  EUICC_IOT_BIND_DL(devA)
+  |  EUICC_IOT_BIND_DL(devB)
+  |  IPA_S2_SPLICER(devA, devB)
+  )

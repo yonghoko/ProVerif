@@ -1,0 +1,203 @@
+(*
+ * ======================================
+ * IoT RSP – S6 scenario: Spoofed completion / state desync
+ * - Attacker cannot decrypt profile (prof_plain stays secret)
+ * - But attacker can forge a valid receipt due to leaked k_tag
+ *   (models TLS termination/session-key exposure)
+ BIND_OK ==> BIND_BEGIN : true (바인딩 검증 성공은 서버가 시작한 바인딩에 대응)
+
+DL_OK ==> BIND_OK : true (설치는 바인딩 검증 이후에만)
+
+DL_S_ACCEPT ==> DL_OK : false (S6 성공: 공격자가 k_tag를 알아내 receipt를 위조/선행전송 → 서버는 완료 처리, eUICC는 설치 안 함)
+
+attacker(prof_plain) : false 또는 “not attacker(prof_plain) is true”로 표시 (평문은 여전히 못 얻음)
+
+“키를 못 얻는데 무슨 의미?”에 대한 S6 답
+
+[Inference] S6의 의미는 **기밀성/키 탈취가 아니라 ‘상태를 속이는 것’**이야. 즉,
+
+서버/운영시스템이 “설치 완료”로 믿고 재고/빌링/컴플라이언스/라이프사이클을 다음 단계로 넘김
+
+실제 단말(eUICC)은 설치하지 않았으니 운영 데이터가 현실과 분리(desync) 됨
+
+공격자는 이를 악용해 대규모 장애(가용성/운영 무결성)나 부정 청구/지원금/프로비저닝 quota 교란 같은 걸 만들 수 있어
+ * ======================================
+ *)
+
+set ignoreTypes = false.
+
+(* ===== CHANNELS ===== *)
+free IPA2EUICC : channel.   (* attacker-controlled in S6 *)
+free IPA2SMDP  : channel.   (* attacker-controlled in S6 *)
+free c         : channel.   (* public leak channel *)
+
+(* ===== DATA TYPES ===== *)
+type Id_t.
+type Tid_t.
+type ProfID_t.
+
+type SkDH_t.
+type PkDH_t.
+type K_t.
+type Tag_t.
+
+type SigKey_t.
+type VerKey_t.
+
+(* ===== CONSTANTS ===== *)
+const ID_SMDP     : Id_t.
+
+const t_getQU     : Tag_t.
+const t_bindReq   : Tag_t.
+const t_bindResp  : Tag_t.
+const t_dlReceipt : Tag_t.
+
+(* ===== CRYPTO PRIMITIVES ===== *)
+fun pk(SkDH_t) : PkDH_t.
+
+fun DH(SkDH_t, PkDH_t) : K_t.
+equation forall su:SkDH_t, ss:SkDH_t;
+  DH(su, pk(ss)) = DH(ss, pk(su)).
+
+fun kdf_prof(K_t, Id_t, PkDH_t, PkDH_t) : K_t.
+fun k_data(K_t) : K_t.
+fun k_mac(K_t)  : K_t.
+
+fun senc(bitstring, K_t) : bitstring.
+reduc forall m:bitstring, k:K_t;
+  sdec(senc(m,k),k) = m.
+
+fun hmac(K_t, bitstring) : bitstring.
+
+fun spk(SigKey_t) : VerKey_t.
+fun sign(bitstring, SigKey_t) : bitstring.
+reduc forall m:bitstring, sk:SigKey_t;
+  checksign(sign(m, sk), spk(sk)) = m.
+
+free SK_Sp : SigKey_t [private].
+
+(* ===== STRUCTURED PAYLOADS ===== *)
+fun mk_bindReq(Id_t, ProfID_t, PkDH_t) : bitstring [data].
+fun mk_bindResp(Tid_t, Id_t, ProfID_t, PkDH_t, PkDH_t, bitstring) : bitstring [data].
+fun mk_dlReceipt(Tid_t, Id_t, ProfID_t) : bitstring [data].
+
+(* ===== SECRET PROFILE ===== *)
+free prof_plain : bitstring [private].
+
+(* ===== EVENTS ===== *)
+event BIND_BEGIN(Id_t, ProfID_t, Tid_t, PkDH_t, PkDH_t).
+event BIND_OK(Id_t, ProfID_t, Tid_t, PkDH_t, PkDH_t).
+event DL_OK(Id_t, ProfID_t, Tid_t, PkDH_t, PkDH_t).
+event DL_S_ACCEPT(Id_t, ProfID_t, Tid_t, PkDH_t, PkDH_t).
+
+(* ===== QUERIES ===== *)
+query U:Id_t, P:ProfID_t, tid:Tid_t, qu:PkDH_t, qs:PkDH_t;
+  inj-event(BIND_OK(U,P,tid,qu,qs))
+  ==> inj-event(BIND_BEGIN(U,P,tid,qu,qs)).
+
+query U2:Id_t, P2:ProfID_t, tid2:Tid_t, qu2:PkDH_t, qs2:PkDH_t;
+  inj-event(DL_OK(U2,P2,tid2,qu2,qs2))
+  ==> inj-event(BIND_OK(U2,P2,tid2,qu2,qs2)).
+
+(* S6 핵심: 서버가 "완료 처리"했으면(e.g., billing/stock marked installed)
+   반드시 eUICC에서 실제 설치가 일어났어야 한다. *)
+query U3:Id_t, P3:ProfID_t, tid3:Tid_t, qu3:PkDH_t, qs3:PkDH_t;
+  inj-event(DL_S_ACCEPT(U3,P3,tid3,qu3,qs3))
+  ==> inj-event(DL_OK(U3,P3,tid3,qu3,qs3)).
+
+(* confidentiality check *)
+query attacker(prof_plain).
+
+(* ===== eUICC ===== *)
+let EUICC_IOT(dev:Id_t) =
+  new skU:SkDH_t;
+  let Q_U = pk(skU) in
+  in(IPA2EUICC, (tag1:Tag_t, dev1:Id_t));
+  if tag1 = t_getQU then
+  if dev1 = dev then
+    out(IPA2EUICC, (dev, Q_U));
+    in(IPA2EUICC,
+       (dev_br:Id_t, tid_br:Tid_t, prof_br:ProfID_t,
+        Q_S:PkDH_t, BPP_cipher:bitstring, mac_prof:bitstring, sig_prof:bitstring));
+    if dev_br = dev then
+      let Z_US  = DH(skU, Q_S) in
+      let baseK = kdf_prof(Z_US, ID_SMDP, Q_S, Q_U) in
+      let k_enc = k_data(baseK) in
+      let k_tag = k_mac(baseK)  in
+      let bind_body = mk_bindResp(tid_br, dev_br, prof_br, Q_S, Q_U, BPP_cipher) in
+      if mac_prof = hmac(k_tag, bind_body) then
+        let decoded = checksign(sig_prof, spk(SK_Sp)) in
+        if decoded = bind_body then
+          event BIND_OK(dev_br, prof_br, tid_br, Q_U, Q_S);
+          let p = sdec(BPP_cipher, k_enc) in
+          let rec_payload = mk_dlReceipt(tid_br, dev_br, prof_br) in
+          let rec_mac = hmac(k_tag, rec_payload) in
+          event DL_OK(dev_br, prof_br, tid_br, Q_U, Q_S);
+          out(IPA2EUICC, (dev_br, tid_br, prof_br, rec_mac))
+        else 0
+      else 0
+    else 0
+  else 0
+  else 0.
+
+(* ===== SMDP+ ===== *)
+let SMDP_IOT(dev:Id_t) =
+  in(IPA2SMDP, (tag2:Tag_t, dev_req:Id_t, profId:ProfID_t, Q_U:PkDH_t));
+  if tag2 = t_bindReq then
+  if dev_req = dev then
+    new skS:SkDH_t;
+    let Q_S = pk(skS) in
+    let Z_US  = DH(skS, Q_U) in
+    let baseK = kdf_prof(Z_US, ID_SMDP, Q_S, Q_U) in
+    let k_enc = k_data(baseK) in
+    let k_tag = k_mac(baseK)  in
+
+    (* ===== S6 compromise knob: leak MAC key (TLS/session key exposure) ===== *)
+    out(c, k_tag);
+
+    new tid:Tid_t;
+    let BPP_cipher = senc(prof_plain, k_enc) in
+    let bind_body = mk_bindResp(tid, dev_req, profId, Q_S, Q_U, BPP_cipher) in
+    let mac_prof  = hmac(k_tag, bind_body) in
+    let sig_prof  = sign(bind_body, SK_Sp) in
+    event BIND_BEGIN(dev_req, profId, tid, Q_U, Q_S);
+    out(IPA2SMDP, (t_bindResp, dev_req, tid, profId, Q_S, BPP_cipher, mac_prof, sig_prof));
+
+    (* receipt accept *)
+    in(IPA2SMDP, (tag3:Tag_t, dev_rec:Id_t, tid_rec:Tid_t, prof_rec:ProfID_t, rec_mac:bitstring));
+    if tag3 = t_dlReceipt then
+    if dev_rec = dev_req then
+    if prof_rec = profId then
+    if tid_rec = tid then
+      let rec_payload = mk_dlReceipt(tid_rec, dev_rec, prof_rec) in
+      if rec_mac = hmac(k_tag, rec_payload) then
+        event DL_S_ACCEPT(dev_rec, prof_rec, tid_rec, Q_U, Q_S)
+      else 0
+    else 0
+  else 0
+  else 0.
+
+(* ===== IPA (honest forwarder, but channels are attacker-controlled) ===== *)
+let IPA_IOT(dev:Id_t) =
+  (* get Q_U *)
+  out(IPA2EUICC, (t_getQU, dev));
+  in(IPA2EUICC, (dev_qu:Id_t, Q_U:PkDH_t));
+  if dev_qu = dev then
+    new profId:ProfID_t;
+    out(IPA2SMDP, (t_bindReq, dev, profId, Q_U));
+    in(IPA2SMDP,
+       (tagR:Tag_t, devR:Id_t, tidR:Tid_t, profR:ProfID_t,
+        Q_S:PkDH_t, BPP_cipher:bitstring, mac_prof:bitstring, sig_prof:bitstring));
+    if tagR = t_bindResp then
+    if devR = dev then
+      out(IPA2EUICC, (devR, tidR, profR, Q_S, BPP_cipher, mac_prof, sig_prof));
+      in(IPA2EUICC, (dev_rc:Id_t, tid_rc:Tid_t, prof_rc:ProfID_t, rec_mac:bitstring));
+      if dev_rc = dev then
+        out(IPA2SMDP, (t_dlReceipt, dev_rc, tid_rc, prof_rc, rec_mac))
+      else 0
+    else 0
+  else 0.
+
+process
+  new devMain:Id_t;
+  ( SMDP_IOT(devMain) | IPA_IOT(devMain) | EUICC_IOT(devMain) )
