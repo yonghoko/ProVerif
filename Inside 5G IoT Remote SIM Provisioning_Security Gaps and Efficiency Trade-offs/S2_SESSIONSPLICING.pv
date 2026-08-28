@@ -86,11 +86,11 @@ free prof_plain : bitstring [private].
 (* request includes profId (so IPA can tamper with it as a plaintext field) *)
 fun mk_bindReq(Id_t, ProfID_t, PkDH_t) : bitstring [data].
 
-(* VULNERABLE: bind_body omits profId (!!!) *)
+(* DELIBERATELY WEAK: bind_body omits profId *)
 fun mk_bindRespWeak(Tid_t, Id_t, PkDH_t, PkDH_t, bitstring) : bitstring [data].
 (*           (tid, dev, Q_S, Q_U, BPP_cipher)                 *)
 
-(* VULNERABLE: receipt omits profId (!!!) *)
+(* DELIBERATELY WEAK: receipt omits profId *)
 fun mk_dlReceiptWeak(Tid_t, Id_t) : bitstring [data].
 (*           (tid, dev)            *)
 
@@ -142,7 +142,7 @@ let EUICC_IOT_BIND_DL(dev:Id_t) =
       let k_enc = k_data(baseK) in
       let k_tag = k_mac(baseK)  in
 
-      (* VULNERABLE: prof_br NOT included in bind_body *)
+      (* DELIBERATELY WEAK: prof_br NOT included in bind_body *)
       let bind_body = mk_bindRespWeak(tid_br, dev_br, Q_S, Q_U, BPP) in
 
       if mac_prof = hmac(k_tag, bind_body) then
@@ -152,7 +152,7 @@ let EUICC_IOT_BIND_DL(dev:Id_t) =
 
           let p = sdec(BPP, k_enc) in
 
-          (* VULNERABLE: receipt NOT bound to profId *)
+          (* DELIBERATELY WEAK: receipt NOT bound to profId *)
           let rec_payload = mk_dlReceiptWeak(tid_br, dev_br) in
           let rec_mac     = hmac(k_tag, rec_payload) in
 
@@ -182,7 +182,7 @@ let SMDP_IOT_BIND_DL =
 
       let BPP = senc(prof_plain, k_enc) in
 
-      (* VULNERABLE: profId NOT included in bind_body *)
+      (* DELIBERATELY WEAK: profId NOT included in bind_body *)
       let bind_body = mk_bindRespWeak(tid, dev_req, Q_S, Q_U, BPP) in
       let mac_prof  = hmac(k_tag, bind_body) in
       let sig_prof  = sign(bind_body, SK_Sp) in
@@ -197,7 +197,7 @@ let SMDP_IOT_BIND_DL =
       if dev_rec = dev_req then
       if tid_rec = tid then
 
-        (* VULNERABLE: server verifies receipt without profId *)
+        (* DELIBERATELY WEAK: server verifies receipt without profId *)
         let rec_payload = mk_dlReceiptWeak(tid_rec, dev_rec) in
         if rec_mac = hmac(k_tag, rec_payload) then
           event DL_S_ACCEPT(dev_rec, prof_rec, tid_rec, Q_U, Q_S);

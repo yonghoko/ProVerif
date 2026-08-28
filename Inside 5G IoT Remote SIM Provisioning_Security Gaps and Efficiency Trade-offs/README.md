@@ -4,6 +4,16 @@ This directory contains the ProVerif models released with the article
 "Inside 5G IoT Remote SIM Provisioning: Security Gaps and Efficiency
 Trade-offs."
 
+## Artifact revision history
+
+Original public artifact: commit
+`8b600efa1d8e6a3a432fefb10f64db3b7c8fc375`. Clarified/corrected artifact:
+commit `d35b1c7ecd10d491ccceadc9e6bc61c261344430`, whose parent is the original
+artifact commit. This revision includes documentation clarifications
+and adds the private symbolic capability `authContext(dev,Q_U)` to S1, S4,
+S6, and S7 to make the assumed Phase-A handoff explicit. The historical
+filenames are unchanged.
+
 ## Artifact consistency note
 
 The filenames and directory structure are retained exactly as released with
@@ -135,6 +145,9 @@ Both transport channels are public, but `authContext(dev,Q_U)` retains the
 already-completed authentication precondition. No long-term or ECDH secret is
 explicitly leaked in S1.
 
+The historical filename `S1_TLS_KEYLEAK.pv` is retained unchanged; the current
+scenario models transport/channel exposure rather than explicit key leakage.
+
 ### S2: session splicing with weak profile binding
 
 ```text
@@ -214,10 +227,10 @@ inj-event(DL_OK(...)) ==> inj-event(BIND_OK(...))            TRUE
 not attacker(prof_plain)                                    TRUE
 ```
 
-The public signing key enables an active attacker to construct a forged
-binding response, so binding agreement fails. The honest profile remains
-protected by the fresh ECDH-derived encryption key. Because the model has no
-"record now, compromise later" phases, it does not establish a general
+The exposed SM-DP+ signing secret key enables an active attacker to construct
+a forged binding response, so binding agreement fails. The honest profile
+remains protected by the fresh ECDH-derived encryption key. Because the model
+has no "record now, compromise later" phases, it does not establish a general
 retrospective PFS theorem.
 
 ## Paper-code consistency corrections
