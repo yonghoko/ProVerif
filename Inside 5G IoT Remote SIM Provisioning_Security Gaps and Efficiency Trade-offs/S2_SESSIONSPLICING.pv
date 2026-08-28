@@ -1,24 +1,29 @@
 (*
- * ============================================================
-1. inj-event(BIND_OK) ==> inj-event(BIND_BEGIN) : false (깨짐)
-이유: SMDP는 (devA, profA, tidA, Q_UA, QS_A)로 BIND_BEGIN 이벤트를 찍습니다.
-그런데 IPA가 평문 profId만 바꿔치기해서 devA에게 (devA, tidA, profB, QS_A, ...)로 전달하면,
-eUICC는 MAC/SIG 검증을 bind_body에 profId가 없어서 통과하고,
-BIND_OK(devA, profB, tidA, Q_UA, QS_A)를 찍음.
-이때 profB에 대해 SMDP가 BIND_BEGIN(devA, profB, tidA, ...)를 찍은 적이 없으니, 대응 begin이 없어서 injective correspondence가 깨집니다.
-
-2. inj-event(DL_OK) ==> inj-event(BIND_OK) : true
-
-DL_OK는 EUICC 코드에서 BIND_OK 다음에만 발생하도록 짜여 있어서, 이 쿼리는 보통 유지됩니다.
-
-3. inj-event(DL_S_ACCEPT) ==> inj-event(DL_OK) : true
-
-서버가 receipt MAC 검증을 통과해야 DL_S_ACCEPT를 찍는데, receipt MAC은 세션 키(k_tag)를 알아야 만들 수 있으므로(상징 모델에서) 해당 세션에서 DL_OK를 찍은 eUICC가 존재하게 되는 쪽으로 귀결되는 경우가 많습니다.
-
-4. query not attacker(prof_plain) : true
-
-IPA가 메시지를 바꿔치기하더라도 (키가 없으면) BPP를 복호화할 수 없게 모델링되어 있어서, 프로파일 평문 자체는 유출되지 않는 게 보통입니다.
- * ============================================================
+ * MODEL PURPOSE:
+ *   Demonstrate the effect of omitting profId from authenticated Phase-B data.
+ *
+ * MODEL TYPE:
+ *   Deliberately weakened binding variant / negative-control model.
+ *
+ * DELIBERATE MODIFICATION:
+ *   profId is omitted from both the signed/MACed binding body and the receipt
+ *   body. The explicit malicious IPA swaps plaintext profile labels between
+ *   two otherwise valid transactions.
+ *
+ * SECURITY PROPERTIES:
+ *   BIND_OK ==> BIND_BEGIN; DL_OK ==> BIND_OK;
+ *   DL_S_ACCEPT ==> DL_OK; and profile secrecy.
+ *
+ * OBSERVED PROVERIF 2.05 RESULT:
+ *   The binding correspondence is FALSE, including non-injective agreement.
+ *   The two ordering correspondences and profile secrecy are TRUE.
+ *
+ * INTERPRETATION:
+ *   Weak field binding permits profile relabeling in this degraded model.
+ *
+ * NON-CLAIM:
+ *   This model does not establish that the standardized GSMA binding object
+ *   omits profId or contains this exact vulnerability.
  *)
 
 set ignoreTypes = false.

@@ -1,11 +1,26 @@
 (*
- * ======================================
- * IoT RSP – Binding + Profile Download
- * GSMA / Ahmed-style ECDH + Profile Protection
- *  - Assumes mutual authentication already completed
- *  - This phase: Q_U / Q_S / Z_US / k, k' + BPP + receipt
- *  - Orchestrator: IPA (IoT Profile Assistant)
- * ======================================
+ * MODEL PURPOSE:
+ *   Baseline verification of Phase-B profile binding, BPP delivery,
+ *   installation ordering, and profile confidentiality.
+ *
+ * MODEL TYPE:
+ *   Baseline verification model.
+ *
+ * ASSUMPTIONS:
+ *   Mutual authentication has already completed; the IPA is honest; and the
+ *   IPA-eUICC and IPA-SM-DP+ links are private. Fresh Q_U and Q_S values derive
+ *   separate encryption and MAC keys for the BPP and receipt.
+ *
+ * SECURITY PROPERTIES:
+ *   BIND_OK ==> BIND_BEGIN; DL_OK ==> BIND_OK; and profile secrecy.
+ *
+ * OBSERVED PROVERIF 2.05 RESULT:
+ *   Both injective correspondences and profile secrecy are TRUE.
+ *
+ * INTERPRETATION BOUNDARY:
+ *   Phase A and Phase B are separate symbolic models. This file assumes, but
+ *   does not prove, that the exact Phase-A authenticated context is propagated
+ *   into the Phase-B transaction. It is not a monolithic proof of SGP.32.
  *)
 
 set ignoreTypes = false.

@@ -1,17 +1,29 @@
 (*
- * ============================================================
- * IoT RSP - S4: Concurrent-order race / wrong-profile install
- * - Baseline crypto holds (MAC+Sig+ECDH-derived keys)
- * - But authorization ("CONSENT") is NOT bound to the session
- * - Malicious IPA triggers two orders (A,B) and forwards only B
- IPA가 PROF_B에 대한 바인딩 응답을 “정상 암호검증 가능한 형태로” EUICC에 전달하므로,
-
-EUICC는 키를 훔친 공격이 아니라도 그냥 PROF_B를 정상 설치(DL_OK) 해 버릴 수 있고,
-
-그런데 시스템은 CONSENT를 PROF_A에 대해서만 발생시키므로,
-
-“설치된 프로파일이 승인된 프로파일이어야 한다”는 성질이 깨진다.
- * ============================================================
+ * MODEL PURPOSE:
+ *   Examine authorization consistency under two concurrent profile orders.
+ *
+ * MODEL TYPE:
+ *   Concurrent-order race / authorization-mismatch model. The historical
+ *   filename S4_RACE_REPLAY.pv is retained unchanged.
+ *
+ * ASSUMPTIONS AND DELIBERATE BEHAVIOR:
+ *   The fleet manager authorizes PROF_A. The explicit malicious IPA obtains
+ *   valid orders for PROF_A and PROF_B but forwards only PROF_B. The private
+ *   authContext(dev,Q_U) capability retains the already-completed Phase-A
+ *   authentication precondition while both IPA-facing channels remain public.
+ *
+ * SECURITY PROPERTIES:
+ *   BIND_OK ==> BIND_BEGIN; DL_OK ==> BIND_OK; secrecy of both profiles; and
+ *   DL_OK ==> CONSENT.
+ *
+ * OBSERVED PROVERIF 2.05 RESULT:
+ *   The binding and ordering correspondences and both secrecy queries are
+ *   TRUE. The authorization correspondence is FALSE.
+ *
+ * INTERPRETATION BOUNDARY:
+ *   The counterexample primarily models concurrent-order authorization
+ *   mismatch. It does not reuse a previously valid message and therefore is
+ *   not an independent proof of a conventional message-replay attack.
  *)
 
 set ignoreTypes = false.
@@ -78,6 +90,9 @@ reduc forall m:bitstring, sk:SigKey_t;
 fun mk_bindResp(Tid_t, Id_t, ProfID_t, PkDH_t, PkDH_t, bitstring) : bitstring [data].
 fun mk_dlReceipt(Tid_t, Id_t, ProfID_t) : bitstring [data].
 
+(* Abstract capability exported by the already-completed Phase-A session. *)
+fun authContext(Id_t, PkDH_t) : bitstring [private].
+
 (* ===== SECRETS ===== *)
 free profA_plain : bitstring [private].
 free profB_plain : bitstring [private].
@@ -119,7 +134,7 @@ let EUICC_ONE(dev:Id_t) =
   if tag1 = t_getQU then
   if dev1 = dev then
     (
-      out(IPA2EUICC, (dev, Q_U));
+      out(IPA2EUICC, (dev, Q_U, authContext(dev, Q_U)));
 
       in(IPA2EUICC,
         (tag2:Tag_t,
@@ -165,8 +180,10 @@ let EUICC_ONE(dev:Id_t) =
 
 (* SMDP: session per bindReq, uses chSess for response+receipt to avoid cross-consume nondet *)
 let SMDP_SESSION() =
-  in(IPA2SMDP, (tag:Tag_t, dev:Id_t, profId:ProfID_t, Q_U:PkDH_t, chSess:channel));
+  in(IPA2SMDP, (tag:Tag_t, dev:Id_t, profId:ProfID_t, Q_U:PkDH_t,
+                auth_ctx:bitstring, chSess:channel));
   if tag = t_bindReq then
+  if auth_ctx = authContext(dev, Q_U) then
     (
       new skS:SkDH_t;
       let Q_S = pk(skS) in
@@ -239,14 +256,14 @@ let FLEET_MANAGER(dev:Id_t) =
 (* Malicious IPA: creates two orders (A and B), but forwards ONLY B to EUICC *)
 let IPA_S4_RACE(dev:Id_t) =
   out(IPA2EUICC, (t_getQU, dev));
-  in(IPA2EUICC, (dev_qu:Id_t, Q_U:PkDH_t));
+  in(IPA2EUICC, (dev_qu:Id_t, Q_U:PkDH_t, auth_ctx:bitstring));
   if dev_qu = dev then
     (
       new chA:channel;
       new chB:channel;
 
-      out(IPA2SMDP, (t_bindReq, dev, PROF_A, Q_U, chA));
-      out(IPA2SMDP, (t_bindReq, dev, PROF_B, Q_U, chB));
+      out(IPA2SMDP, (t_bindReq, dev, PROF_A, Q_U, auth_ctx, chA));
+      out(IPA2SMDP, (t_bindReq, dev, PROF_B, Q_U, auth_ctx, chB));
 
       in(chA, (tagA:Tag_t, dvA:Id_t, tidA:Tid_t, pidA:ProfID_t, QS_A:PkDH_t, BPP_A:bitstring, macA:bitstring, sigA:bitstring));
       in(chB, (tagB:Tag_t, dvB:Id_t, tidB:Tid_t, pidB:ProfID_t, QS_B:PkDH_t, BPP_B:bitstring, macB:bitstring, sigB:bitstring));

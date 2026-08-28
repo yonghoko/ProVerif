@@ -1,27 +1,28 @@
 (*
- *               _oo0oo_
- *              o8888888o
- *              88" . "88
- *              (| -_- |)
- *              0\  =  /0
- *            ___/`---'\___
- *          .' \\|     |// '.
- *         / \\|||  :  |||// \
- *        / _||||| -:- |||||_ \    
- *       |   | \\\  -  /// |   |
- *       | \_|  ''\---/''  |_/ |
- *       \  .-\__  '-'  __/-.  /
- *     ___'. .'  /--.--\  `. .'___
- *  ."" '<  `.___\_<|>_/___.' >' "".
- * | | :  `- \`.;`\ _ /`;.`/ - ` : | |
- * \  \ `_.   \_ __\ /__ _/   .-` /  /
- * =====-.____.___ __/.-___.-'===== =---='
-
- * ======================================
- * IoT / Consumer RSP – Mutual Authentication only
- * Phase 2: Common Mutual Authentication between SMDP+, IPA, eUICC
- *  - eIM Package / AC 주입은 완료된 상태로 가정
- * ======================================
+ * MODEL PURPOSE:
+ *   Baseline verification of the Phase-A mutual-authentication exchange among
+ *   the SM-DP+, IPA, and eUICC.
+ *
+ * MODEL TYPE:
+ *   Baseline verification model.
+ *
+ * ASSUMPTIONS:
+ *   The eIM package and activation code are already provisioned. The IPA is an
+ *   honest relay, and the local and TLS-protected links are private channels.
+ *
+ * SECURITY PROPERTIES:
+ *   (1) U_AUTH_OK ==> S_AUTH_BEGIN,
+ *   (2) S_AUTH_OK ==> U_AUTH_OK, and
+ *   (3) S_AUTH_OK ==> S_AUTH_BEGIN, all as injective correspondences.
+ *   Property (3) is the direct publication-aligned formulation; properties
+ *   (1) and (2) retain the two-step correspondence of the released model.
+ *
+ * OBSERVED PROVERIF 2.05 RESULT:
+ *   All three injective correspondence queries are TRUE.
+ *
+ * INTERPRETATION BOUNDARY:
+ *   This file verifies Phase A only. It does not establish a compositional
+ *   correspondence from this authenticated session to a Phase-B transaction.
  *)
 
 
@@ -109,11 +110,15 @@ event S_AUTH_OK(Id_t, Tid_t).  (* SMDP finished client auth *)
 
 (* eUICC server-auth implies server started that session *)
 query U:Id_t, tid:Tid_t;
-  event(U_AUTH_OK(U, tid))  ==>  inj-event(S_AUTH_BEGIN(U, tid)).
+  inj-event(U_AUTH_OK(U, tid))  ==>  inj-event(S_AUTH_BEGIN(U, tid)).
 
 (* SMDP client-auth implies eUICC has server-auth OK *)
 query U2:Id_t, tid2:Tid_t;
-  event(S_AUTH_OK(U2, tid2))  ==>  inj-event(U_AUTH_OK(U2, tid2)).
+  inj-event(S_AUTH_OK(U2, tid2))  ==>  inj-event(U_AUTH_OK(U2, tid2)).
+
+(* Publication-aligned direct server-completion correspondence. *)
+query U3:Id_t, tid3:Tid_t;
+  inj-event(S_AUTH_OK(U3, tid3))  ==>  inj-event(S_AUTH_BEGIN(U3, tid3)).
 
 
 (* ===== eUICC – Mutual Auth only ===== *)
@@ -171,7 +176,7 @@ let EUICC_HONEST(PK_CI:K_t, dev:Id_t) =
     let clientSigned = mk_clientSigned(tidU, sChalU) in
     let clientSig    = sign(clientSigned, SK_EUICC) in
 
-    (* (14) Send to IPA – 끝. 여기까지가 Mutual Authentication phase *)
+    (* (14) Return the response to the IPA, completing mutual authentication. *)
     out(IPA2EUICC,
         (dev, clientSigned, clientSig, Cert_EUICC))
   ).

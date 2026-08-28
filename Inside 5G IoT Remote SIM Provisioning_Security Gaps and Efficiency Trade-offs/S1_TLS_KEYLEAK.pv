@@ -1,11 +1,27 @@
 (*
- * ======================================
- * IoT RSP – Binding + Profile Download
- * GSMA / Ahmed-style ECDH + Profile Protection
- *  - Assumes mutual authentication already completed
- *  - This phase: Q_U / Q_S / Z_US / k, k' + BPP + receipt
- *  - Orchestrator: IPA (IoT Profile Assistant)
- * ======================================
+ * MODEL PURPOSE:
+ *   Stress-test Phase-B properties when the IPA-facing transport channels are
+ *   exposed to the Dolev-Yao adversary.
+ *
+ * MODEL TYPE:
+ *   Transport/channel exposure robustness model.
+ *
+ * DELIBERATE MODIFICATION AND ASSUMPTION:
+ *   Both IPA-facing channels are public. No long-term key or ephemeral ECDH
+ *   secret is released. An unforgeable authContext(dev,Q_U) capability models
+ *   the assumption that Phase A already authenticated the eUICC's Q_U before
+ *   the SM-DP+ accepts a Phase-B binding request.
+ *
+ * SECURITY PROPERTIES:
+ *   BIND_OK ==> BIND_BEGIN; DL_OK ==> BIND_OK; and profile secrecy.
+ *
+ * OBSERVED PROVERIF 2.05 RESULT:
+ *   Both injective correspondences and profile secrecy are TRUE.
+ *
+ * INTERPRETATION BOUNDARY:
+ *   The result applies to this transport-exposure model with the explicit
+ *   Phase-A context precondition. authContext is a symbolic capability, not a
+ *   claim about an exact standardized message or a cross-phase proof.
  *)
 
 set ignoreTypes = false.
@@ -84,6 +100,9 @@ reduc forall m:bitstring, sk:SigKey_t;
 fun mk_bindReq(Id_t, ProfID_t, Pk_t) : bitstring [data].
 (* (dev, profId, Q_U) *)
 
+(* Abstract capability exported by the already-completed Phase-A session. *)
+fun authContext(Id_t, Pk_t) : bitstring [private].
+
 (* SMDP → eUICC binding response body: tid, dev, profId, Q_S, Q_U, BPP_cipher *)
 fun mk_bindResp(Tid_t, Id_t, ProfID_t, Pk_t, Pk_t, bitstring) : bitstring [data].
 (* (tid, dev, profId, Q_S, Q_U, BPP_cipher) *)
@@ -138,7 +157,7 @@ let EUICC_IOT_BIND_DL(dev:Id_t) =
     if dev_in = dev then
 
       (* (U2) eUICC sends Q_U to IPA *)
-      out(IPA2EUICC, (dev, Q_U));
+      out(IPA2EUICC, (dev, Q_U, authContext(dev, Q_U)));
 
       (* (U3) Later: receive full binding response from SMDP via IPA *)
       in(IPA2EUICC,
@@ -196,10 +215,12 @@ let SMDP_IOT_BIND_DL(dev:Id_t) =
        (tag_req   : Tag_t,
         dev_req   : Id_t,
         profId    : ProfID_t,
-        Q_U       : Pk_t));
+        Q_U       : Pk_t,
+        auth_ctx  : bitstring));
 
     if tag_req = t_bindReq then
     if dev_req = dev then
+    if auth_ctx = authContext(dev_req, Q_U) then
 
       (* Generate ephemeral ECDH keypair for this binding *)
       new skS : Sk_t;
@@ -266,12 +287,12 @@ let IPA_IOT_BIND_DL(dev:Id_t) =
     out(IPA2EUICC, (t_getQU, dev));
 
     (* (I2) Receive Q_U *)
-    in(IPA2EUICC, (dev_qu:Id_t, Q_U:Pk_t));
+    in(IPA2EUICC, (dev_qu:Id_t, Q_U:Pk_t, auth_ctx:bitstring));
     if dev_qu = dev then
 
       (* (I3) Initiate binding with SMDP+ *)
       new profId : ProfID_t;
-      out(IPA2SMDP, (t_bindReq, dev, profId, Q_U));
+      out(IPA2SMDP, (t_bindReq, dev, profId, Q_U, auth_ctx));
 
       (* (I4) Receive binding response from SMDP+ *)
       in(IPA2SMDP,

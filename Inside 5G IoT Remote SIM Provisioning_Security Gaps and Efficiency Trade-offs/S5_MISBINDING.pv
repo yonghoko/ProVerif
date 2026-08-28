@@ -1,12 +1,30 @@
 (*
- * IoT RSP - S5 Misbinding demo
- * Idea: signature/MAC body omits (dev, profId, tid).
- * Attacker relabels profId/tid/dev in the outer message => eUICC still verifies.
- (핵심) 정당한 컨텍스트에 대한 바인딩이 무너짐: eUICC의 BIND_OK가 서버의 대응 시작 이벤트와 동일 튜플로 연결되지 않는다.
-
-(부가) 승인/주문 정책을 강제하는 증거가 암호학적으로 묶여있지 않으면 DL_OK가 CONSENT 없이도 가능해진다.
-
-(하지만) 프로파일 평문은 여전히 비밀일 수 있다
+ * MODEL PURPOSE:
+ *   Demonstrate the effect of authenticating an incomplete binding context.
+ *
+ * MODEL TYPE:
+ *   Deliberately weakened authenticated-context / negative-control model.
+ *
+ * DELIBERATE MODIFICATION:
+ *   The signed and MACed body mk_bindBody_weak contains only Q_S, Q_U, and
+ *   BPP_cipher. It omits dev, tid, and profId. The explicit malicious IPA
+ *   relabels a valid PROF_A response as PROF_B.
+ *
+ * SECURITY PROPERTIES:
+ *   BIND_OK ==> BIND_BEGIN; DL_OK ==> BIND_OK; DL_OK ==> CONSENT; profile
+ *   secrecy; and reachability of S5_MISBIND.
+ *
+ * OBSERVED PROVERIF 2.05 RESULT:
+ *   Binding agreement and authorization are FALSE; installation ordering and
+ *   profile secrecy are TRUE; and S5_MISBIND is reachable.
+ *
+ * INTERPRETATION:
+ *   Omitting transaction-critical context permits relabeling and misbinding in
+ *   this deliberately weakened model.
+ *
+ * NON-CLAIM:
+ *   This result does not establish that the standardized GSMA object omits
+ *   dev, tid, or profId.
  *)
 
 set ignoreTypes = false.

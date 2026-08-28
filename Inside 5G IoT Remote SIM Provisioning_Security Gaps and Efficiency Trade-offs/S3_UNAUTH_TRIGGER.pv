@@ -1,71 +1,30 @@
 (*
- * IoT RSP – S3 Unauthorized Provisioning Trigger (end-to-end)
- * Goal: Show that install (DL_OK) can happen WITHOUT any CONSENT(U,ProfID).
- * So the query: DL_OK ==> CONSENT should become FALSE.
-
- 1) inj-event(BIND_OK) ==> inj-event(BIND_BEGIN) is true
-
-공격자가 (악성 IPA/네트워크 장악 상태여도) eUICC가 ‘바인딩 검증에 성공했다(BIND_OK)’고 찍게 만드는 상황을 만들려면,
-
-반드시 서버(SMDP+) 쪽에서 그 바인딩을 실제로 생성한 흔적(BIND_BEGIN) 이 존재해야 한다는 뜻입니다.
-
-공격적으로 해석하면: 바인딩 응답 위조/유도 성공(=BIND_OK)을 “서버가 만든 바인딩 없이” 만들어내는 위조 공격은 막힌다는 의미예요.
-(MAC+서명 검증이 제대로 걸려있다는 시그널)
-
-2) inj-event(DL_OK) ==> inj-event(BIND_OK) is true
-
-eUICC가 프로파일 설치 완료(DL_OK) 를 찍는 실행(trace)이 있으면,
-
-그 전에 무조건 바인딩 검증 성공(BIND_OK) 이 선행되어야 한다는 뜻입니다.
-
-공격적으로 해석하면: “바인딩 스킵하고 바로 설치로 점프” 같은 흐름(절차 무시)은 ProVerif 모델에서 불가능하다는 결론입니다.
-즉, 설치는 바인딩 검증을 반드시 통과해야만 함.
-
-3) not attacker(prof_plain) is true
-
-공격자는 트래픽을 다 보고/바꾸고/재전송해도 프로파일 평문(prof_plain)을 알아내지 못한다는 뜻입니다.
-
-중요한 포인트: 이건 “공격자가 키를 얻어 복호화하는지”만 보는 게 아니라, 관측 가능한 모든 메시지 + 조작 가능한 릴레이(IPA) 환경에서 그 평문이 논리적으로 유출되는 경로가 있는지를 보는 거예요.
-
-공격 관점 의미: 기밀성(Confidentiality)은 유지됩니다.
-
-4) event(DL_OK) ==> event(CONSENT) is false
-
-이게 S3의 핵심이에요.
-
-“어떤 설치 완료(DL_OK) 실행이 있으면, 반드시 사전 동의/승인(CONSENT)이 있어야 한다”라는 요구사항을 걸었는데,
-
-ProVerif가 반례(trace)를 찾았다는 뜻입니다. 즉,
-
-CONSENT가 한 번도 발생하지 않았는데도 DL_OK는 발생하는 실행이 존재한다.
-
-공격적으로 번역하면:
-
-공격자는 키를 훔치지 못해도,
-
-‘승인/소유권/의도 확인’이 없는 주문/트리거 경로를 악용해서
-
-“정상적인 암호 검증을 거쳐” 프로파일 설치까지 흐름을 완료시킬 수 있다는 겁니다.
-
-즉, S3는 “암호가 깨진다”가 아니라,
-
-권한 없는 프로비저닝 트리거(authorization bypass),
-
-프로세스/정책 레벨의 취약점(누가 프로비저닝을 시작할 수 있는가?)을 잡아내는 쿼리예요.
-
-그래서 “공격자가 키를 못 얻는데 무슨 의미?”에 대한 답
-
-의미가 큽니다. IoT RSP에서 실제 사고는 종종 (1) 데이터 유출만이 아니라 (2) 잘못된 상태 전이로도 발생하거든요.
-
-기밀성은 지켜져도,
-
-공격자가 원치 않는 프로파일을 원치 않는 디바이스에 ‘정상 설치’ 시키면:
-
-운영자 관점: 가입/요금/재고/기기 관리가 깨지고,
-
-보안 관점: 디바이스의 네트워크 소속/정책이 바뀌고(=관리권 영향),
-
-공급망/대량 운영 관점: “승인 없는 대규모 변경”이 가능해집니다.
+ * MODEL PURPOSE:
+ *   Test whether successful cryptographic provisioning alone establishes an
+ *   authorization or proof-of-possession property.
+ *
+ * MODEL TYPE:
+ *   Authorization-gate omission stress test.
+ *
+ * DELIBERATE ASSUMPTION:
+ *   The malicious IPA can trigger provisioning without a process that emits a
+ *   corresponding CONSENT event. The binding cryptography remains intact.
+ *
+ * SECURITY PROPERTIES:
+ *   BIND_OK ==> BIND_BEGIN; DL_OK ==> BIND_OK; profile secrecy; and
+ *   DL_OK ==> CONSENT.
+ *
+ * OBSERVED PROVERIF 2.05 RESULT:
+ *   The binding and ordering correspondences and profile secrecy are TRUE.
+ *   The authorization correspondence is FALSE.
+ *
+ * INTERPRETATION:
+ *   Cryptographic success does not imply authorization when the authorization
+ *   gate is absent from the modeled deployment.
+ *
+ * NON-CLAIM:
+ *   This result does not establish that standardized GSMA IoT RSP lacks an
+ *   authorization or proof-of-possession mechanism.
  *)
 
 set ignoreTypes = false.
